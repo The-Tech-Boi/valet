@@ -1,6 +1,5 @@
-//! `valet run` (owner: core). Spec: valet/__main__.py `run_command`.
-//! Starts a command with valet:// references in its environment replaced by the secrets, and copies
-//! its output to ours with every one of those secrets redacted.
+//! `valet run`: starts a command with the valet:// references in its environment replaced by the
+//! secrets, and copies its output to ours with every one of those secrets redacted.
 
 use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Read, Write};
@@ -8,12 +7,18 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
 use anyhow::{anyhow, Result};
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use zeroize::Zeroizing;
 
-use crate::broker::Redactor;
+use crate::redact::Redactor;
 
-pub type Resolved = (BTreeMap<String, Zeroizing<String>>, Vec<(String, Vec<String>)>);
+/// The agent's answer to a resolve request: the values per variable, and each item's secrets to redact.
+#[derive(Default, Serialize, Deserialize)]
+pub struct Resolved {
+    pub values: BTreeMap<String, Zeroizing<String>>,
+    pub secrets: Vec<(String, Vec<Zeroizing<String>>)>,
+}
 
 const USAGE: &str = "usage: valet run [-e NAME=valet://ITEM/FIELD] [--env-file F] -- COMMAND...";
 
@@ -26,9 +31,7 @@ fn resolve_via_agent(refs: BTreeMap<String, String>, what: String) -> Result<Res
     if let Some(e) = r["error"].as_str() {
         return Err(anyhow!("{e}"));
     }
-    let values = serde_json::from_value::<BTreeMap<String, String>>(r["values"].clone())?;
-    let secrets = serde_json::from_value(r["secrets"].clone())?;
-    Ok((values.into_iter().map(|(k, v)| (k, Zeroizing::new(v))).collect(), secrets))
+    Ok(serde_json::from_value(r)?)
 }
 
 /// Exit code of the command; 2 if valet refused or failed before starting it.
@@ -59,8 +62,8 @@ fn run(
         let _ = writeln!(err, "{USAGE}\nvalet: give the command to run after --");
         return 2;
     }
-    let mut env: BTreeMap<String, String> = std::env::vars_os()
-        .filter_map(|(k, v)| Some((k.into_string().ok()?, v.into_string().ok()?)))
+    let mut env: BTreeMap<String, Zeroizing<String>> = std::env::vars_os()
+        .filter_map(|(k, v)| Some((k.into_string().ok()?, Zeroizing::new(v.into_string().ok()?))))
         .collect();
     for path in files {
         match std::fs::read_to_string(path) {
@@ -71,13 +74,13 @@ fn run(
             }
         }
     }
-    env.extend(sets.iter().filter_map(|kv| kv.split_once('=')).map(|(k, v)| (k.to_string(), v.to_string())));
+    env.extend(sets.iter().filter_map(|kv| kv.split_once('=')).map(|(k, v)| (k.to_string(), Zeroizing::new(v.to_string()))));
     env.retain(|k, _| !k.eq_ignore_ascii_case("BW_SESSION")); // the child gets its secrets, not the vault key
     let refs: BTreeMap<String, String> =
-        env.iter().filter(|(_, v)| v.starts_with("valet://")).map(|(k, v)| (k.clone(), v.clone())).collect();
+        env.iter().filter(|(_, v)| v.starts_with("valet://")).map(|(k, v)| (k.clone(), v.to_string())).collect();
     let what = cmd.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(" ");
-    let (values, named) = if refs.is_empty() {
-        Default::default()
+    let resolved = if refs.is_empty() {
+        Resolved::default()
     } else {
         match resolve(refs, what) {
             Ok(r) => r,
@@ -87,12 +90,12 @@ fn run(
             }
         }
     };
-    env.extend(values.iter().map(|(k, v)| (k.clone(), v.to_string())));
-    let redact = Redactor::new(&named);
+    let redact = Redactor::new(&resolved.secrets);
+    env.extend(resolved.values);
     let child = Command::new(which(cmd[0], &env))
         .args(&cmd[1..])
         .env_clear()
-        .envs(&env)
+        .envs(env.iter().map(|(k, v)| (k, v.as_str())))
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn();
@@ -112,7 +115,7 @@ fn run(
     child.wait().ok().and_then(|s| s.code()).unwrap_or(1)
 }
 
-/// ponytail: line-buffered; a prompt without a newline shows late.
+/// Line-buffered: a prompt without a newline shows late.
 fn pump(src: impl Read, dst: &mut impl Write, redact: &Redactor) {
     let (mut src, mut line) = (BufReader::new(src), Vec::new());
     while src.read_until(b'\n', &mut line).unwrap_or(0) > 0 {
@@ -122,19 +125,20 @@ fn pump(src: impl Read, dst: &mut impl Write, redact: &Redactor) {
     }
 }
 
-fn read_env_file(text: &str) -> Vec<(String, String)> {
+fn read_env_file(text: &str) -> Vec<(String, Zeroizing<String>)> {
     text.trim_start_matches('\u{feff}')
         .lines()
         .filter_map(|l| {
             let (k, v) = l.trim().split_once('=')?;
             let k = k.strip_prefix("export ").unwrap_or(k).trim();
-            (!k.is_empty() && !k.starts_with('#')).then(|| (k.to_string(), v.trim().trim_matches(['\'', '"']).to_string()))
+            let v = Zeroizing::new(v.trim().trim_matches(['\'', '"']).to_string());
+            (!k.is_empty() && !k.starts_with('#')).then(|| (k.to_string(), v))
         })
         .collect()
 }
 
 /// Like shutil.which: find `cmd` on PATH with PATHEXT, so `npm` finds npm.cmd. Else `cmd` as given.
-fn which(cmd: &str, env: &BTreeMap<String, String>) -> PathBuf {
+fn which(cmd: &str, env: &BTreeMap<String, Zeroizing<String>>) -> PathBuf {
     let get = |k: &str| env.iter().find(|(n, _)| n.eq_ignore_ascii_case(k)).map(|(_, v)| v.as_str()).unwrap_or("");
     if !cmd.contains(['/', '\\']) && std::path::Path::new(cmd).extension().is_none() {
         for dir in std::env::split_paths(get("PATH")) {
@@ -152,8 +156,10 @@ fn which(cmd: &str, env: &BTreeMap<String, String>) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::broker::tests::{broker, cred, temp_home, PASSWORD};
+    use crate::broker::tests::{broker, rt, temp_home};
     use crate::broker::Answer;
+    use crate::cred::tests::PASSWORD;
+    use crate::cred::Cred;
 
     #[test]
     fn injects_redacts_and_strips_bw_session() {
@@ -161,8 +167,8 @@ mod tests {
         std::fs::create_dir_all(&home).unwrap();
         let env_file = home.join("x.env");
         std::fs::write(&env_file, "\u{feff}# comment\nexport BW_SESSION='vault-key'\nDB_USER=\"valet://db/username\"\n").unwrap();
-        let (b, calls) = broker(vec![cred("db", &[], PASSWORD, &[("broker_approval", "never")])], Answer::Deny, &home);
-        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let (b, calls) = broker(vec![Cred::test("db", &[], PASSWORD, &[("broker_approval", "never")])], Answer::Deny, &home);
+        let rt = rt();
         let resolve = |refs, what: String| rt.block_on(b.resolve(refs, &what, "test")).map_err(|e| anyhow!("{e}"));
         let args: Vec<String> = [
             "--env-file", env_file.to_str().unwrap(), "-e", "DB_PASS=valet://db/password", "--",

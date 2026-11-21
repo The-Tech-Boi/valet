@@ -198,7 +198,7 @@ def run_command(broker, argv, stdout=None, stderr=None):
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
     def pump(src, dst):
-        for line in iter(src.readline, b""):  # ponytail: line-buffered; a prompt without newline shows late
+        for line in iter(src.readline, b""):  # line-buffered; a prompt without newline shows late
             dst.write(redact(decode(line)))
             dst.flush()
 

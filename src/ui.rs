@@ -1,4 +1,4 @@
-//! Approval, unlock and setup windows (owner: ui). Design: mocks/approval-dialog.html variant A,
+//! Approval, unlock and setup windows. Design: mocks/approval-dialog.html variant A,
 //! mocks/setup-window.html. One UI thread for the agent's lifetime; windows (WebView2) exist only
 //! while shown, so the idle agent carries no browser engine.
 //!
@@ -157,8 +157,7 @@ fn run(started: Sender<EventLoopProxy<Msg>>) {
     let proxy = event_loop.create_proxy();
     started.send(proxy.clone()).unwrap();
     // Without a data directory WebView2 writes "valet.exe.WebView2" next to the binary.
-    let dir = std::env::var_os("LOCALAPPDATA").map(|d| std::path::Path::new(&d).join("valet").join("webview"));
-    let mut context = WebContext::new(dir);
+    let mut context = WebContext::new(Some(crate::agent::home().join("webview")));
     let mut open: HashMap<u64, (Window, WebView, Sender<Zeroizing<String>>)> = HashMap::new();
 
     event_loop.run(move |event, target, flow| {

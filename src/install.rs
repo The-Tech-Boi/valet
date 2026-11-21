@@ -1,8 +1,7 @@
-//! `valet install` / `valet uninstall` (owner: core): the exe in %LOCALAPPDATA%\Programs\valet and
+//! `valet install` / `valet uninstall`: the exe in %LOCALAPPDATA%\Programs\valet and
 //! that folder on the user's PATH, so `valet` works in any new terminal. No admin rights needed.
 
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 
 use anyhow::{Context, Result};
 use windows::core::w;
@@ -23,15 +22,18 @@ pub fn install() -> Result<PathBuf> {
     let me = std::env::current_exe()?;
     if !same_file(&me, &exe) {
         std::fs::create_dir_all(&dir)?;
-        // a stopping agent may hold the old exe open for a moment
-        let mut tries = 0;
-        while let Err(e) = std::fs::copy(&me, &exe) {
-            tries += 1;
-            if tries == 20 {
-                return Err(e).with_context(|| format!("cannot copy valet to {}", exe.display()));
+        // Old copies still running (MCP clients' shims) cannot be overwritten or deleted, only renamed;
+        // leftovers from earlier installs go once nothing runs them.
+        for f in std::fs::read_dir(&dir)?.flatten() {
+            if f.file_name().to_string_lossy().starts_with("valet.old-") {
+                let _ = std::fs::remove_file(f.path());
             }
-            std::thread::sleep(Duration::from_millis(100));
         }
+        if exe.exists() {
+            let old = dir.join(format!("valet.old-{}.exe", std::process::id()));
+            std::fs::rename(&exe, &old).with_context(|| format!("cannot move the old {} aside", exe.display()))?;
+        }
+        std::fs::copy(&me, &exe).with_context(|| format!("cannot copy valet to {}", exe.display()))?;
     }
     let path = user_path()?;
     if !on_path(&path, &dir) {
@@ -41,7 +43,8 @@ pub fn install() -> Result<PathBuf> {
     Ok(exe)
 }
 
-/// Takes `dir()` off PATH and deletes it. A running installed exe is moved to %TEMP% first.
+/// Takes `dir()` off PATH and deletes it. Exes still running (this one, MCP clients' shims) are moved
+/// to %TEMP% first: Windows lets a running exe be renamed, not deleted.
 pub fn uninstall() -> Result<()> {
     let dir = dir();
     let path = user_path()?;
@@ -49,10 +52,10 @@ pub fn uninstall() -> Result<()> {
         let kept: Vec<&str> = path.split(';').filter(|e| !same_dir(e, &dir)).collect();
         set_user_path(&kept.join(";"))?;
     }
-    let exe = dir.join("valet.exe");
-    if same_file(&std::env::current_exe()?, &exe) {
-        // Windows lets a running exe be renamed, not deleted.
-        std::fs::rename(&exe, std::env::temp_dir().join(format!("valet-removed-{}.exe", std::process::id())))?;
+    for (i, f) in std::fs::read_dir(&dir).into_iter().flatten().flatten().enumerate() {
+        if std::fs::remove_file(f.path()).is_err() {
+            let _ = std::fs::rename(f.path(), std::env::temp_dir().join(format!("valet-removed-{}-{i}.exe", std::process::id())));
+        }
     }
     match std::fs::remove_dir_all(&dir) {
         Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e).with_context(|| format!("cannot delete {}", dir.display())),
@@ -98,7 +101,7 @@ fn user_path() -> Result<String> {
 
 /// Writes HKCU\Environment\Path and tells running programs (Explorer, new terminals) about it.
 fn set_user_path(path: &str) -> Result<()> {
-    let wide: Vec<u16> = path.encode_utf16().chain([0]).collect();
+    let wide = crate::wide(path);
     unsafe {
         RegSetKeyValueW(
             HKEY_CURRENT_USER,

@@ -1,6 +1,5 @@
-//! browser_login and `valet browser` (owner: browser). Spec: valet/broker.py `browser_login`,
-//! `windows_login`, `fill_login`; valet/__main__.py `start_browser`. Speaks CDP directly over a
-//! websocket (no Playwright).
+//! browser_login and `valet browser`: signs in in the user's shared browser, speaking the DevTools
+//! protocol directly over a websocket.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -11,8 +10,8 @@ use tokio::net::TcpStream;
 use tokio::time::{sleep, timeout, Instant};
 use tokio_tungstenite::{connect_async, tungstenite::Message, MaybeTlsStream, WebSocketStream};
 
-use crate::broker::{not_allowed, totp_now};
-use crate::cred::{fail, Cred, Error, Result};
+use crate::cred::{fail, Cred, Error, Result, Tool};
+use crate::otp::totp_now;
 
 const PASS_SEL: &str = "input[type=password]";
 const USER_SEL: &str = "input[autocomplete=username], input[type=email], input[name*=user i], input[id*=user i], \
@@ -51,21 +50,18 @@ e?.focus(); return false;"#;
 
 type Field<'a> = (&'static str, &'a str);
 
-/// Sign in in the shared browser. `url` is the explicit URL or None for the item's first URI.
+/// Sign in in the shared browser at `url`, which the broker has checked against the item.
+/// `explicit`: the caller asked for this URL, so a reused tab elsewhere navigates there.
 /// Returns {"status", "url", "title"}.
-pub async fn login(cred: &Cred, url: Option<&str>, cdp: &str) -> Result<Value> {
-    let target = url.map(str::to_string).or_else(|| cred.uris.first().cloned()).unwrap_or_default();
-    if let Some(why) = not_allowed(cred, &target) {
-        return Err(Error::Refused(why));
-    }
+pub async fn login(cred: &Cred, url: &str, explicit: bool, cdp: &str) -> Result<Value> {
     let run = async {
         let (mut page, frame, at) = open_tab(cred, cdp).await?;
         page.call("Page.bringToFront", json!({})).await?;
-        if cred.auth("browser_login") == "ntlm" {
-            return windows_login(&mut page, cred, &target, &frame).await;
+        if cred.auth(Tool::BrowserLogin) == "ntlm" {
+            return windows_login(&mut page, cred, url, &frame).await;
         }
-        if at.is_none() || url.is_some_and(|u| Some(u) != at.as_deref()) {
-            page.goto(cred, &target, &frame, 0).await?;
+        if at.is_none() || (explicit && at.as_deref() != Some(url)) {
+            page.goto(cred, url, &frame, 0).await?;
         }
         fill_login(&mut page, cred).await
     };
@@ -77,7 +73,7 @@ pub async fn login(cred: &Cred, url: Option<&str>, cdp: &str) -> Result<Value> {
 async fn open_tab(cred: &Cred, cdp: &str) -> Result<(Page, String, Option<String>)> {
     let http = reqwest::Client::new();
     let tabs: Vec<Value> = http.get(format!("{cdp}/json/list")).send().await.map_err(fail)?.json().await.map_err(fail)?;
-    let reuse = tabs.into_iter().find(|t| t["type"] == "page" && not_allowed(cred, t["url"].as_str().unwrap_or("")).is_none());
+    let reuse = tabs.into_iter().find(|t| t["type"] == "page" && cred.check_url(t["url"].as_str().unwrap_or("")).is_ok());
     let reused = reuse.is_some();
     let tab = match reuse {
         Some(t) => t,
@@ -133,7 +129,7 @@ async fn fill_login(p: &mut Page, cred: &Cred) -> Result<Value> {
         if !p.wait(VISIBLE, code, 5).await {
             return p.result("submitted (no TOTP field appeared)").await;
         }
-        p.fill(cred, code, &totp_now(cred).unwrap_or_default()).await?;
+        p.fill(cred, code, &totp_now(&cred.totp).unwrap_or_default()).await?;
         p.submit(cred, code).await?;
         if !p.wait(GONE, code, 15).await {
             return p.result("TOTP field still visible after submit").await;
@@ -207,7 +203,7 @@ impl Page {
                 }
                 match m["method"].as_str().unwrap_or("") {
                     "Fetch.authRequired" => {
-                        let ok = answered < answers && not_allowed(cred, ev["request"]["url"].as_str().unwrap_or("")).is_none();
+                        let ok = answered < answers && cred.check_url(ev["request"]["url"].as_str().unwrap_or("")).is_ok();
                         answered += ok as u32;
                         let resp = if ok {
                             json!({"response": "ProvideCredentials", "username": cred.username, "password": cred.password.as_str()})
@@ -267,7 +263,7 @@ impl Page {
     /// Type `value` into `f`, but only while the page is on a host this credential may use.
     async fn fill(&mut self, cred: &Cred, f: Field<'_>, value: &str) -> Result<()> {
         let href = self.dom("return location.href;", &[]).await?;
-        if let Some(why) = not_allowed(cred, href.as_str().unwrap_or("")) {
+        if let Err(why) = cred.check_url(href.as_str().unwrap_or("")) {
             return Err(Error::Refused(format!("login page is on a host this credential may not use: {why}")));
         }
         if self.dom(FILL, &[json!(f.0), json!(f.1), json!(value), href]).await? != Value::Bool(true) {
@@ -329,9 +325,8 @@ mod tests {
     use zeroize::Zeroizing;
 
     use super::*;
+    use crate::cred::tests::{PASSWORD, SEED};
 
-    const PASSWORD: &str = "P@ss-test-456";
-    const SEED: &str = "JBSWY3DPEHPK3PXP";
     const LOGIN: &str = r#"<title>Sign in</title><input type=text name=q placeholder=search>
 <form method=post action=/login><input type=text name=user><input type=password name=pass>
 <button type=button>show</button><button type=submit>Sign in</button></form>"#;
@@ -342,18 +337,11 @@ mod tests {
 <input type=hidden name=user value=plain-user><input type=password name=pass></form>"#;
 
     fn cred(name: &str, uri: &str, password: &str, username: &str, totp: &str, fields: &[(&str, &str)]) -> Cred {
-        Cred {
-            id: format!("id-{name}"),
-            name: name.into(),
-            username: username.into(),
-            password: Zeroizing::new(password.into()),
-            totp: Zeroizing::new(totp.into()),
-            uris: vec![uri.into()],
-            fields: fields.iter().map(|(k, v)| (k.to_string(), Zeroizing::new(v.to_string()))).collect(),
-        }
+        Cred { username: username.into(), totp: Zeroizing::new(totp.into()), ..Cred::test(name, &[uri], password, fields) }
     }
 
-    /// The login site from conftest.py; records (method, path, body) of every request.
+    /// A login site with a TOTP step, a username-first flow and a Basic-auth intranet page;
+    /// records (method, path, body) of every request.
     struct Site {
         url: String,
         seen: Arc<Mutex<Vec<(String, String, String)>>>,
@@ -419,7 +407,7 @@ mod tests {
             ("POST", "/login") if get("user") == "web-user" => redirect("/otp", "half"),
             ("POST", "/login") => redirect("/welcome", "ok"),
             ("GET", "/otp") => page(OTP_PAGE),
-            ("POST", "/otp") if cookie.contains("session=half") && totp_now(&web).as_deref().map(String::as_str) == Some(get("code")) => {
+            ("POST", "/otp") if cookie.contains("session=half") && totp_now(&web.totp).as_deref().map(String::as_str) == Some(get("code")) => {
                 redirect("/welcome", "ok")
             }
             ("POST", "/otp") => page(OTP_PAGE),
@@ -477,21 +465,27 @@ mod tests {
     fn assert_clean(out: &Value, c: &Cred) {
         let text = out.to_string();
         assert!(!text.contains(PASSWORD) && !text.contains("P%40ss"), "{text}");
-        if let Some(code) = totp_now(c) {
+        if let Some(code) = totp_now(&c.totp) {
             assert!(!text.contains(code.as_str()), "{text}");
         }
     }
 
-    async fn page_tabs(cdp: &str) -> usize {
+    /// browser_login as the broker calls it: at `url`, or at the item's first URI.
+    async fn sign_in(c: &Cred, url: Option<&str>, cdp: &str) -> Result<Value> {
+        login(c, url.unwrap_or(&c.uris[0]), url.is_some(), cdp).await
+    }
+
+    /// Tabs on `site`; Edge may open pages of its own meanwhile.
+    async fn site_tabs(cdp: &str, site: &str) -> usize {
         let tabs: Vec<Value> = reqwest::get(format!("{cdp}/json/list")).await.unwrap().json().await.unwrap();
-        tabs.iter().filter(|t| t["type"] == "page").count()
+        tabs.iter().filter(|t| t["type"] == "page" && t["url"].as_str().unwrap_or("").starts_with(site)).count()
     }
 
     #[tokio::test]
     async fn login_with_totp() {
         let (s, e) = (site().await, edge().await);
         let web = cred("web", &format!("{}/login", s.url), PASSWORD, "web-user", SEED, &[]);
-        let out = login(&web, None, &e.cdp).await.unwrap(); // opens the item's first URI in a new tab
+        let out = sign_in(&web, None, &e.cdp).await.unwrap(); // opens the item's first URI in a new tab
         assert_eq!(out["status"], "submitted", "{out}");
         assert_eq!(out["url"], format!("{}/welcome", s.url));
         assert_eq!(out["title"], "Welcome");
@@ -503,12 +497,12 @@ mod tests {
         let (s, e) = (site().await, edge().await);
         let plain = cred("web-plain", &format!("{}/login", s.url), PASSWORD, "plain-user", "", &[("broker_auth", "form")]);
         let url = format!("{}/login", s.url);
-        login(&plain, Some(&url), &e.cdp).await.unwrap();
-        let tabs = page_tabs(&e.cdp).await;
-        let out = login(&plain, Some(&url), &e.cdp).await.unwrap();
+        sign_in(&plain, Some(&url), &e.cdp).await.unwrap();
+        let tabs = site_tabs(&e.cdp, &s.url).await;
+        let out = sign_in(&plain, Some(&url), &e.cdp).await.unwrap();
         assert_eq!(out["status"], "submitted", "{out}");
         assert_eq!(out["title"], "Welcome");
-        assert_eq!(page_tabs(&e.cdp).await, tabs);
+        assert_eq!(site_tabs(&e.cdp, &s.url).await, tabs);
         assert_clean(&out, &plain);
     }
 
@@ -516,7 +510,7 @@ mod tests {
     async fn username_first_flow_submits_with_enter() {
         let (s, e) = (site().await, edge().await);
         let plain = cred("web-plain", &format!("{}/login", s.url), PASSWORD, "plain-user", "", &[]);
-        let out = login(&plain, Some(&format!("{}/first", s.url)), &e.cdp).await.unwrap();
+        let out = sign_in(&plain, Some(&format!("{}/first", s.url)), &e.cdp).await.unwrap();
         assert_eq!(out["status"], "submitted", "{out}");
         assert_eq!(out["title"], "Welcome");
     }
@@ -525,7 +519,7 @@ mod tests {
     async fn wrong_password_reported_without_leak() {
         let (s, e) = (site().await, edge().await);
         let web = cred("web", &format!("{}/login", s.url), "Wr0ng-test-pass", "web-user", SEED, &[]);
-        let out = login(&web, None, &e.cdp).await.unwrap();
+        let out = sign_in(&web, None, &e.cdp).await.unwrap();
         assert!(out["status"].as_str().unwrap().contains("still visible"), "{out}");
         assert_eq!(out["title"], "Sign in");
         assert!(!out.to_string().contains("Wr0ng"));
@@ -535,22 +529,15 @@ mod tests {
     async fn refuses_to_type_on_foreign_host() {
         let (s, e) = (site().await, edge().await);
         let web = cred("web", &format!("{}/login", s.url), PASSWORD, "web-user", SEED, &[]);
-        let err = login(&web, Some(&format!("{}/elsewhere", s.url)), &e.cdp).await.unwrap_err(); // redirects to localhost
+        let err = sign_in(&web, Some(&format!("{}/elsewhere", s.url)), &e.cdp).await.unwrap_err(); // redirects to localhost
         assert!(matches!(&err, Error::Refused(m) if m.contains("may not use")), "{err}");
         assert!(!s.seen.lock().unwrap().iter().any(|(m, p, b)| m == "POST" && p == "/login" && !b.is_empty()));
     }
 
     #[tokio::test]
-    async fn refuses_url_the_item_may_not_use() {
-        let web = cred("web", "http://127.0.0.1:1/login", PASSWORD, "web-user", "", &[]);
-        let err = login(&web, Some("https://example.com/login"), "http://127.0.0.1:1").await.unwrap_err();
-        assert!(matches!(err, Error::Refused(_)), "{err}");
-    }
-
-    #[tokio::test]
     async fn no_browser_does_not_leak() {
         let web = cred("web", "http://127.0.0.1:1/login", PASSWORD, "web-user", SEED, &[]);
-        let err = login(&web, None, "http://127.0.0.1:1").await.unwrap_err(); // nothing listens there
+        let err = sign_in(&web, None, "http://127.0.0.1:1").await.unwrap_err(); // nothing listens there
         assert!(matches!(err, Error::Failed(_)), "{err}");
         assert!(!err.to_string().contains(PASSWORD));
     }
@@ -560,7 +547,7 @@ mod tests {
         let (s, e) = (site().await, edge().await);
         let url = format!("{}/intranet", s.url);
         let ok = cred("intranet", &url, PASSWORD, "ntlm-user", "", &[("broker_auth", "ntlm")]);
-        let out = login(&ok, None, &e.cdp).await.unwrap();
+        let out = sign_in(&ok, None, &e.cdp).await.unwrap();
         assert_eq!(out["status"], "signed in", "{out}");
         assert_eq!(out["title"], "Intranet");
         assert_clean(&out, &ok);
@@ -571,7 +558,7 @@ mod tests {
         let (s, e) = (site().await, edge().await);
         let url = format!("{}/intranet", s.url);
         let bad = cred("intranet", &url, "Wr0ng-test-pass", "ntlm-user", "", &[("broker_auth", "ntlm")]);
-        let out = login(&bad, None, &e.cdp).await.unwrap();
+        let out = sign_in(&bad, None, &e.cdp).await.unwrap();
         assert_eq!(out["status"], "sign-in failed (HTTP 401)", "{out}");
         let challenges = s.seen.lock().unwrap().iter().filter(|(_, p, _)| p == "/intranet").count();
         assert!(challenges <= 4, "{challenges} requests"); // at most 3 answers, then cancel

@@ -1,4 +1,4 @@
-//! Bitwarden encryption: KDF, key stretching, EncString (types 2 and 4) (owner: vault).
+//! Bitwarden encryption: KDF, key stretching, EncString (types 2 and 4); random UUIDs.
 
 use aes::Aes256;
 use anyhow::{anyhow, bail, Context, Result};
@@ -86,6 +86,15 @@ pub fn rsa_decrypt(enc: &str, private_der: &[u8]) -> Result<Key> {
 
 fn b64(s: &str) -> Result<Vec<u8>> {
     STANDARD.decode(s).context("bad base64 in EncString")
+}
+
+/// A random (version 4) UUID, lowercase with dashes.
+pub fn uuid() -> String {
+    let mut b: [u8; 16] = rand::random();
+    b[6] = (b[6] & 0x0f) | 0x40;
+    b[8] = (b[8] & 0x3f) | 0x80;
+    let h: String = b.iter().map(|x| format!("{x:02x}")).collect();
+    format!("{}-{}-{}-{}-{}", &h[..8], &h[8..12], &h[12..16], &h[16..20], &h[20..])
 }
 
 #[cfg(test)]

@@ -1,4 +1,4 @@
-//! http_request (owner: winauth). Spec: valet/broker.py `Broker._http`.
+//! http_request, plus the HTTP client, error and output helpers the other drivers share.
 //! The broker has already checked the URL against the item and asked approval; this module injects
 //! the auth (bearer, basic, header:<Name>, query:<param>, ntlm via `sspi`) and sends the request.
 
@@ -12,10 +12,11 @@ use serde_json::{json, Map, Value};
 use url::Url;
 use zeroize::Zeroizing;
 
-use crate::cred::{fail, Cred, Error, Result};
+use crate::cred::{fail, Cred, Error, HttpAuth, Result};
 use crate::sspi;
 
-const MAX_BODY: usize = 20_000;
+/// Characters of a body or command output that a result carries.
+const MAX_OUT: usize = 20_000;
 const KEEP_HEADERS: &[&str] = &[
     "content-type",
     "content-length",
@@ -35,6 +36,34 @@ pub struct Request {
     pub body: Option<String>,
     pub json: Option<Value>,
     pub timeout: Duration,
+}
+
+/// No redirects (a credential must not follow one to another host) and one pooled connection (a
+/// Windows sign-in is bound to it). `trust_cert` accepts a self-signed certificate.
+pub(crate) fn client(timeout: Duration, trust_cert: bool) -> reqwest::Result<reqwest::Client> {
+    reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(timeout)
+        .pool_max_idle_per_host(1)
+        .danger_accept_invalid_certs(trust_cert)
+        .danger_accept_invalid_hostnames(trust_cert)
+        .build()
+}
+
+/// The first MAX_OUT characters of `text`, and its full length if it was longer.
+fn clip(text: &str) -> (&str, Option<usize>) {
+    match text.char_indices().nth(MAX_OUT) {
+        Some((end, _)) => (&text[..end], Some(text.chars().count())),
+        None => (text, None),
+    }
+}
+
+/// Command output for a result (ssh, winrm): lossy UTF-8, clipped, with a note when it was.
+pub(crate) fn output(bytes: &[u8]) -> String {
+    match clip(&String::from_utf8_lossy(bytes)) {
+        (text, Some(len)) => format!("{text}\n[truncated to {MAX_OUT} of {len} characters]"),
+        (text, None) => text.to_string(),
+    }
 }
 
 /// Network errors by kind, without the URL (it may carry a query-string secret).
@@ -70,46 +99,33 @@ pub(crate) fn challenge(resp: &Response, scheme: &str) -> Option<Vec<u8>> {
 
 /// Returns {"status", "headers" (selected), "body" (truncated at 20000 chars), "truncated"?}.
 pub async fn request(cred: &Cred, req: Request) -> Result<Value> {
-    let auth = cred.auth("http_request");
+    let auth = cred.http_auth()?;
     let mut url = Url::parse(&req.url).map_err(fail)?;
     let mut headers = HeaderMap::new();
     for (k, v) in &req.headers {
         let name = HeaderName::from_bytes(k.as_bytes()).map_err(fail)?;
         headers.insert(name, HeaderValue::from_str(v).map_err(fail)?);
     }
-    match auth.as_str() {
-        "ntlm" => {}
-        "bearer" => {
+    match &auth {
+        HttpAuth::Ntlm => {}
+        HttpAuth::Bearer => {
             headers.insert(AUTHORIZATION, secret_header(&Zeroizing::new(format!("Bearer {}", *cred.password)))?);
         }
-        "basic" => {
+        HttpAuth::Basic => {
             let pair = Zeroizing::new(format!("{}:{}", cred.username, *cred.password));
             headers.insert(AUTHORIZATION, secret_header(&Zeroizing::new(format!("Basic {}", B64.encode(&*pair))))?);
         }
-        a if a.starts_with("header:") => {
-            let name = HeaderName::from_bytes(a[7..].trim().as_bytes()).map_err(fail)?;
-            headers.insert(name, secret_header(&cred.password)?);
+        HttpAuth::Header(name) => {
+            headers.insert(HeaderName::from_bytes(name.as_bytes()).map_err(fail)?, secret_header(&cred.password)?);
         }
-        a if a.starts_with("query:") => {
-            let param = a[6..].trim();
+        HttpAuth::Query(param) => {
             let kept: Vec<(String, String)> = url.query_pairs().filter(|(k, _)| k != param).map(|(k, v)| (k.into(), v.into())).collect();
             url.query_pairs_mut().clear().extend_pairs(kept).append_pair(param, &cred.password);
-        }
-        _ => {
-            return Err(Error::Refused(format!(
-                "credential {:?} has broker_auth={auth:?}, which http_request cannot use",
-                cred.name
-            )))
         }
     }
     let method = Method::from_bytes(req.method.to_uppercase().as_bytes()).map_err(fail)?;
     // One client per request: the Windows sign-in is bound to its keep-alive connection.
-    let client = reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .timeout(req.timeout)
-        .pool_max_idle_per_host(1)
-        .build()
-        .map_err(net_err)?;
+    let client = client(req.timeout, cred.flag("broker_trust_cert")).map_err(net_err)?;
     let send = |auth: Option<String>| {
         let mut b = client.request(method.clone(), url.clone()).headers(headers.clone());
         if let Some(a) = auth {
@@ -123,7 +139,7 @@ pub async fn request(cred: &Cred, req: Request) -> Result<Value> {
         b.send()
     };
     let mut resp = send(None).await.map_err(net_err)?;
-    if auth == "ntlm" && resp.status() == StatusCode::UNAUTHORIZED {
+    if auth == HttpAuth::Ntlm && resp.status() == StatusCode::UNAUTHORIZED {
         resp = windows_sign_in(cred, &url, resp, send).await?;
     }
     let status = resp.status().as_u16();
@@ -139,10 +155,10 @@ pub async fn request(cred: &Cred, req: Request) -> Result<Value> {
         }
     }
     let text = resp.text().await.map_err(net_err)?;
-    let len = text.chars().count();
-    let mut out = json!({"status": status, "headers": kept, "body": text.chars().take(MAX_BODY).collect::<String>()});
-    if len > MAX_BODY {
-        out["truncated"] = json!(format!("body truncated to {MAX_BODY} of {len} characters"));
+    let (body, len) = clip(&text);
+    let mut out = json!({"status": status, "headers": kept, "body": body});
+    if let Some(len) = len {
+        out["truncated"] = json!(format!("body truncated to {MAX_OUT} of {len} characters"));
     }
     Ok(out)
 }
@@ -181,24 +197,20 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
+    use crate::cred::tests::{PASSWORD, TOKEN};
     use std::sync::{Arc, Mutex};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
 
-    const TOKEN: &str = "tok_test_123";
-    const PASSWORD: &str = "P@ss-test-456";
-
     fn cred(name: &str, auth: &str, password: &str) -> Cred {
-        Cred {
-            id: format!("id-{name}"),
-            name: name.into(),
-            username: "svc-user".into(),
-            password: Zeroizing::new(password.into()),
-            totp: Zeroizing::new(String::new()),
-            uris: vec![],
-            fields: HashMap::from([("broker_auth".to_string(), Zeroizing::new(auth.to_string()))]),
-        }
+        Cred::test(name, &[], password, &[("broker_auth", auth)])
+    }
+
+    #[test]
+    fn output_is_clipped() {
+        assert_eq!(output(b"hi"), "hi");
+        let t = output("é".repeat(MAX_OUT + 1).as_bytes());
+        assert!(t.ends_with("é\n[truncated to 20000 of 20001 characters]") && t.chars().count() == MAX_OUT + 41);
     }
 
     fn req(method: &str, url: String) -> Request {

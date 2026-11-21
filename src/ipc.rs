@@ -1,4 +1,4 @@
-//! Named pipe between the per-session shims (`mcp`, `run`, CLI) and the one agent (owner: core).
+//! Named pipe between the per-session shims (`mcp`, `run`, CLI) and the one agent.
 //! Pipe \\.\pipe\valet-<user>, owned by and limited to the current user. One JSON request line, one
 //! JSON response line. The client starts the agent if the pipe is not there.
 //!

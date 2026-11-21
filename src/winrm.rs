@@ -1,6 +1,5 @@
-//! win_exec (owner: winauth). Spec: valet/broker.py `winrm_run` (pywinrm `run_ps`).
-//! WS-Management shell over http(s) with Negotiate/NTLM via `sspi`, messages encrypted with the
-//! security context on plain http.
+//! win_exec: a PowerShell command in a WS-Management shell over http(s), signed in with
+//! Negotiate/NTLM via `sspi`; on plain http the messages are encrypted with that security context.
 
 use std::sync::LazyLock;
 use std::time::{Duration, Instant};
@@ -12,10 +11,10 @@ use reqwest::StatusCode;
 use serde_json::{json, Value};
 
 use crate::cred::{fail, Cred, Endpoint, Error, Result};
-use crate::http::{challenge, net_err};
+use crate::crypto::uuid;
+use crate::http::{challenge, client, net_err, output};
 use crate::sspi;
 
-const MAX_OUT: usize = 20_000;
 const SOAP: &str = "application/soap+xml;charset=UTF-8";
 const PROTOCOL: &str = "application/HTTP-SPNEGO-session-encrypted";
 const BOUNDARY: &[u8] = b"--Encrypted Boundary";
@@ -51,13 +50,7 @@ fn unescape(s: &str) -> String {
     s.replace("&lt;", "<").replace("&gt;", ">").replace("&quot;", "\"").replace("&apos;", "'").replace("&amp;", "&")
 }
 
-fn uuid() -> String {
-    let n = (rand::random::<u128>() & !(0xf000 << 64) & !(0xc << 60)) | (0x4000 << 64) | (0x8 << 60);
-    let h = format!("{n:032x}");
-    format!("{}-{}-{}-{}-{}", &h[..8], &h[8..12], &h[12..16], &h[16..20], &h[20..])
-}
-
-/// A WS-Management request for the cmd shell resource, as pywinrm builds it.
+/// A WS-Management request for the cmd shell resource.
 fn envelope(action: &str, shell: Option<&str>, options: &str, body: &str, secs: u64) -> String {
     let selector = shell
         .map(|id| format!(r#"<w:SelectorSet><w:Selector Name="ShellId">{id}</w:Selector></w:SelectorSet>"#))
@@ -91,7 +84,7 @@ fn parse_receive(xml: &str) -> Result<(Vec<u8>, Vec<u8>, Option<i64>)> {
     Ok((out, err, code))
 }
 
-/// PowerShell's CLIXML error stream as plain text, like pywinrm `_clean_error_msg`.
+/// PowerShell's CLIXML error stream as plain text: the error records' text, progress records dropped.
 fn clean_stderr(err: Vec<u8>) -> Vec<u8> {
     let Some(xml) = err.strip_prefix(b"#< CLIXML\r\n") else { return err };
     let xml = String::from_utf8_lossy(xml);
@@ -122,7 +115,7 @@ fn seal(ctx: &sspi::Client, msg: &[u8]) -> Result<Vec<u8>> {
     Ok(out)
 }
 
-/// Inverse of `seal`; also accepts several encrypted parts in one body, as pywinrm does.
+/// Inverse of `seal`; also accepts several encrypted parts in one body.
 fn unseal(ctx: &sspi::Client, body: &[u8]) -> Result<Vec<u8>> {
     let bad = || fail("WinRM sent a malformed encrypted message");
     let part = [BOUNDARY, b"\r\n"].concat();
@@ -158,19 +151,11 @@ struct Session {
 }
 
 impl Session {
-    /// Sign in with an empty POST on the connection all later messages use (pywinrm `setup_encryption`).
+    /// Sign in with an empty POST on the connection all later messages use.
     async fn open(cred: &Cred, ep: &Endpoint, timeout: Duration) -> Result<Session> {
         let tls = ep.scheme == "winrms";
-        let trust = tls && cred.flag("broker_trust_cert");
         let secs = timeout.as_secs().max(1);
-        let http = reqwest::Client::builder()
-            .redirect(reqwest::redirect::Policy::none())
-            .timeout(Duration::from_secs(secs + 10))
-            .pool_max_idle_per_host(1)
-            .danger_accept_invalid_certs(trust)
-            .danger_accept_invalid_hostnames(trust)
-            .build()
-            .map_err(net_err)?;
+        let http = client(Duration::from_secs(secs + 10), cred.flag("broker_trust_cert")).map_err(net_err)?;
         let url = format!("{}://{}:{}/wsman", if tls { "https" } else { "http" }, ep.host, ep.port);
         let mut ctx = sspi::Client::new("Negotiate", &cred.username, &cred.password, &format!("HTTP/{}", ep.host))?;
         let mut input = None;
@@ -256,16 +241,6 @@ impl Session {
     }
 }
 
-fn truncated(bytes: &[u8]) -> String {
-    let text = String::from_utf8_lossy(bytes);
-    let len = text.chars().count();
-    let mut out: String = text.chars().take(MAX_OUT).collect();
-    if len > MAX_OUT {
-        out += &format!("\n[truncated to {MAX_OUT} of {len} characters]");
-    }
-    out
-}
-
 /// Runs a PowerShell command. Returns {"status", "exit_code", "stdout", "stderr"}.
 pub async fn exec(cred: &Cred, ep: &Endpoint, command: &str, timeout: Duration) -> Result<Value> {
     let s = Session::open(cred, ep, timeout).await?;
@@ -276,7 +251,7 @@ pub async fn exec(cred: &Cred, ep: &Endpoint, command: &str, timeout: Duration) 
     let result = s.run(&shell, command, timeout).await;
     let _ = s.call(DELETE, Some(&shell), "", "").await; // also stops a command that is still running
     let (out, err, code) = result?;
-    Ok(json!({"status": code, "exit_code": code, "stdout": truncated(&out), "stderr": truncated(&clean_stderr(err))}))
+    Ok(json!({"status": code, "exit_code": code, "stdout": output(&out), "stderr": output(&clean_stderr(err))}))
 }
 
 #[cfg(test)]
@@ -315,7 +290,7 @@ mod tests {
     </s:Fault></s:Body></s:Envelope>"#;
 
     #[test]
-    fn builds_pywinrm_messages() {
+    fn builds_messages() {
         let x = envelope(CREATE, None, &(opt("WINRS_NOPROFILE", "FALSE") + &opt("WINRS_CODEPAGE", "437")), "<rsp:Shell/>", 60);
         for part in [
             r#"<a:Action mustUnderstand="true">http://schemas.xmlsoap.org/ws/2004/09/transfer/Create</a:Action>"#,
@@ -334,7 +309,7 @@ mod tests {
     }
 
     #[test]
-    fn parses_pywinrm_answers() {
+    fn parses_answers() {
         assert_eq!(capture(&SHELL_ID, OPEN_SHELL, "ShellId").unwrap(), "11111111-1111-1111-1111-111111111113");
         assert_eq!(capture(&COMMAND_ID, COMMAND, "CommandId").unwrap(), "11111111-1111-1111-1111-111111111114");
         assert!(capture(&COMMAND_ID, OPEN_SHELL, "CommandId").unwrap_err().to_string().contains("no CommandId"));
@@ -375,12 +350,5 @@ mod tests {
         let at = find(&body, b"Length=3").unwrap();
         body[at + 7] = b'4';
         assert!(unseal(&s2, &body).unwrap_err().to_string().contains("does not match"));
-    }
-
-    #[test]
-    fn output_truncation() {
-        assert_eq!(truncated(b"ok"), "ok");
-        let t = truncated("é".repeat(20_001).as_bytes());
-        assert!(t.ends_with("\n[truncated to 20000 of 20001 characters]") && t.starts_with("éé"));
     }
 }

@@ -1,21 +1,18 @@
-//! rdp_open (owner: core). Spec: valet/broker.py `save_rdp_login`, `rdp_run`.
+//! rdp_open: hands the login to Windows for mstsc and opens a Remote Desktop window.
 
 use serde_json::{json, Value};
 use windows::core::PWSTR;
 use windows::Win32::Security::Credentials::{CredWriteW, CREDENTIALW, CRED_PERSIST_SESSION, CRED_TYPE_DOMAIN_PASSWORD};
 use zeroize::Zeroizing;
 
-use crate::cred::{fail, Cred, Endpoint, Result};
+use crate::cred::{default_port, fail, Cred, Endpoint, Result};
+use crate::wide;
 
 pub fn open(cred: &Cred, ep: &Endpoint) -> Result<Value> {
     save_login(cred, &ep.host)?;
-    let port = if ep.port == 3389 { String::new() } else { format!(":{}", ep.port) };
+    let port = if Some(ep.port) == default_port("rdp") { String::new() } else { format!(":{}", ep.port) };
     std::process::Command::new("mstsc").arg(format!("/v:{}{port}", ep.host)).spawn().map_err(fail)?;
     Ok(json!({"status": "opened", "target": format!("{}:{}", ep.host, ep.port)}))
-}
-
-fn wide(s: &str) -> Vec<u16> {
-    s.encode_utf16().chain([0]).collect()
 }
 
 /// Store the login for mstsc as TERMSRV/<host>. Domain-password type: only LSA can read the password
@@ -38,12 +35,13 @@ fn save_login(cred: &Cred, host: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cred::tests::PASSWORD;
     use windows::core::w;
     use windows::Win32::Security::Credentials::{CredDeleteW, CredFree, CredReadW};
 
     #[test]
     fn login_is_saved_unreadable() {
-        let cred = crate::broker::tests::cred("t", &[], crate::broker::tests::PASSWORD, &[]);
+        let cred = Cred::test("t", &[], PASSWORD, &[]);
         let target = w!("TERMSRV/valet-test.invalid");
         save_login(&cred, "valet-test.invalid").unwrap();
         unsafe {

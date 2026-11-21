@@ -1,4 +1,4 @@
-//! Talks to Vaultwarden/Bitwarden directly, replacing `bw serve` (owner: vault).
+//! Talks to Vaultwarden/Bitwarden directly, replacing `bw serve`.
 //!
 //! Login with the user's personal API key (client_credentials), stored DPAPI-protected in
 //! %LOCALAPPDATA%\valet\login.bin. `unlock` derives the master key from the master password
@@ -14,7 +14,7 @@ use serde_json::{json, Value};
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 use crate::cred::Cred;
-use crate::crypto::{self, Kdf, Key};
+use crate::crypto::{self, uuid, Kdf, Key};
 
 /// Bitwarden DeviceType 23 = Windows CLI.
 const DEVICE_TYPE: &str = "23";
@@ -137,7 +137,7 @@ impl Vault {
     }
 
     fn new(login: Login) -> Result<Vault> {
-        let http = reqwest::Client::builder().timeout(Duration::from_secs(30)).build()?;
+        let http = crate::http::client(Duration::from_secs(30), false)?;
         Ok(Vault { login, http, token: None, keys: None, sync: None })
     }
 
@@ -292,14 +292,6 @@ fn cred(c: &Value, base: &Key) -> Result<Cred> {
         uris,
         fields,
     })
-}
-
-fn uuid() -> String {
-    let mut b: [u8; 16] = rand::random();
-    b[6] = (b[6] & 0x0f) | 0x40;
-    b[8] = (b[8] & 0x3f) | 0x80;
-    let h: String = b.iter().map(|x| format!("{x:02x}")).collect();
-    format!("{}-{}-{}-{}-{}", &h[..8], &h[8..12], &h[12..16], &h[16..20], &h[20..])
 }
 
 /// DPAPI (current user) protect or unprotect.

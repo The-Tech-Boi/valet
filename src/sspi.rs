@@ -1,4 +1,4 @@
-//! Windows SSPI client for Negotiate/NTLM with explicit credentials (owner: winauth).
+//! Windows SSPI client for Negotiate/NTLM with explicit credentials.
 //! Used by `http` (Windows sign-in to web apps and APIs) and `winrm` (sign-in plus message
 //! encryption). No NTLM implementation of our own: Windows does it.
 
@@ -10,6 +10,8 @@ use windows::Win32::Foundation::{SEC_E_OK, SEC_I_CONTINUE_NEEDED};
 use windows::Win32::Security::Authentication::Identity::*;
 use windows::Win32::Security::Credentials::SecHandle;
 use zeroize::Zeroizing;
+
+use crate::wide;
 
 /// SEC_WINNT_AUTH_IDENTITY_W; the `windows` crate only has it behind the Win32_System_Rpc feature.
 #[repr(C)]
@@ -32,10 +34,6 @@ pub struct Client {
     target: Vec<u16>,
 }
 
-fn wide(s: &str) -> Vec<u16> {
-    s.encode_utf16().collect()
-}
-
 fn buffer(kind: u32, data: &mut [u8]) -> SecBuffer {
     SecBuffer { cbBuffer: data.len() as u32, BufferType: kind, pvBuffer: data.as_mut_ptr().cast() }
 }
@@ -51,13 +49,14 @@ impl Client {
         let (domain, user) = username.split_once('\\').unwrap_or(("", username));
         let (user, domain) = (wide(user), wide(domain));
         let password = Zeroizing::new(wide(password));
+        // Lengths without the terminating NUL.
         let id = Identity {
             user: user.as_ptr(),
-            user_len: user.len() as u32,
+            user_len: user.len() as u32 - 1,
             domain: domain.as_ptr(),
-            domain_len: domain.len() as u32,
+            domain_len: domain.len() as u32 - 1,
             password: password.as_ptr(),
-            password_len: password.len() as u32,
+            password_len: password.len() as u32 - 1,
             flags: SEC_WINNT_AUTH_IDENTITY_UNICODE,
         };
         Self::open(package, SECPKG_CRED_OUTBOUND, Some(&id as *const Identity as *const c_void), target)
@@ -69,9 +68,7 @@ impl Client {
         unsafe {
             AcquireCredentialsHandleW(PCWSTR::null(), &HSTRING::from(package), usage, None, auth, None, None, &mut cred, None)?;
         }
-        let mut target = wide(target);
-        target.push(0);
-        Ok(Client { cred, ctx: SecHandle::default(), has_ctx: false, complete: false, target })
+        Ok(Client { cred, ctx: SecHandle::default(), has_ctx: false, complete: false, target: wide(target) })
     }
 
     /// Feed the server's token (None for the first call). Returns the token to send, if any.

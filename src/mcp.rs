@@ -1,6 +1,5 @@
-//! MCP over stdio, hand-rolled JSON-RPC (owner: core): initialize, tools/list, tools/call.
-//! A thin shim: every tools/call is forwarded to the agent over `ipc`. Tool names, descriptions and
-//! parameters as in valet/__main__.py `build_app`.
+//! MCP over stdio, hand-rolled JSON-RPC: initialize, tools/list, tools/call.
+//! A thin shim: every tools/call is forwarded to the agent over `ipc`.
 
 use std::io::{BufRead, Write};
 
@@ -145,8 +144,8 @@ or drive the session.",
             "check_credentials",
             "Try the sign-in of each credential (all, or the given names/ids) on each of its URIs and report \
 ok / failed / skipped with a short reason. One approval covers the whole batch. Scheme-less URIs \
-(a bare IP) are probed for ssh, winrm and SQL Server. Use after importing credentials to find wrong \
-passwords.",
+(a bare IP) are not signed in to; the result says which server ports are open there. Use after \
+importing credentials to find wrong passwords.",
             json!({"credentials": {"type": "array", "items": {"type": "string"}}}),
             &[],
         ),
@@ -156,14 +155,16 @@ passwords.",
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::broker::tests::{assert_clean, broker, cred, temp_home, TOKEN};
+    use crate::broker::tests::{assert_clean, broker, rt, temp_home};
     use crate::broker::Answer;
+    use crate::cred::tests::TOKEN;
+    use crate::cred::Cred;
 
     #[test]
     fn tools_list_and_call_round_trip() {
         let home = temp_home("mcp");
-        let (b, _) = broker(vec![cred("api-header", &["https://api.test"], TOKEN, &[])], Answer::Once, &home);
-        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let (b, _) = broker(vec![Cred::test("api-header", &["https://api.test"], TOKEN, &[])], Answer::Once, &home);
+        let rt = rt();
         let input = [
             json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-03-26"}}),
             json!({"jsonrpc": "2.0", "method": "notifications/initialized"}),

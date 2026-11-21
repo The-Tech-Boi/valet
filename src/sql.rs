@@ -1,5 +1,4 @@
-//! sql_query (owner: servers). Spec: valet/broker.py `sql_run`.
-//! SQL Server over TDS. DOMAIN\user items use Windows auth (NTLM) with the item's password; others
+//! sql_query: SQL Server over TDS. DOMAIN\user items use Windows auth (NTLM) with the item's password; others
 //! are SQL logins. `broker_trust_cert=yes` accepts a self-signed certificate.
 
 use std::fmt::Display;
@@ -12,8 +11,7 @@ use tiberius::{AuthMethod, Client, ColumnData, Command, CommandItem, Config, Enc
 use tokio::net::TcpStream;
 use tokio_util::compat::TokioAsyncWriteCompatExt;
 
-use crate::cred::{fail, Cred, Endpoint, Result};
-use crate::ssh::within;
+use crate::cred::{fail, within, Cred, Endpoint, Result};
 
 /// Returns {"status": "ok", "results": [{"columns", "rows", "truncated"?} | {"rows_affected"}]}.
 pub async fn query(
@@ -115,19 +113,11 @@ mod tests {
     use super::*;
     use std::borrow::Cow;
     use tiberius::numeric::Numeric;
+    use crate::cred::tests::PASSWORD;
     use tiberius::{IntoSql, Uuid};
-    use zeroize::Zeroizing;
 
     fn cred(username: &str, fields: &[(&str, &str)]) -> Cred {
-        Cred {
-            id: "1".into(),
-            name: "db".into(),
-            username: username.into(),
-            password: Zeroizing::new("s3cret-test-pass".into()),
-            totp: Zeroizing::new(String::new()),
-            uris: vec!["mssql://db.example.test:1444".into()],
-            fields: fields.iter().map(|(k, v)| (k.to_string(), Zeroizing::new(v.to_string()))).collect(),
-        }
+        Cred { username: username.into(), ..Cred::test("db", &["mssql://db.example.test:1444"], PASSWORD, fields) }
     }
 
     #[test]
@@ -141,7 +131,7 @@ mod tests {
         assert!(win.contains("Windows(") && win.contains("\"svc-user\"") && win.contains("\"CORP\""), "{win}");
         assert!(win.contains("\"master\"") && win.contains("Required") && win.contains("bypass: false"), "{win}");
         assert!(sql.contains("SqlServer(") && sql.contains("\"crm\"") && sql.contains("bypass: true"), "{sql}");
-        assert!(!win.contains("s3cret") && !sql.contains("s3cret"));
+        assert!(!win.contains(PASSWORD) && !sql.contains(PASSWORD));
     }
 
     #[test]
