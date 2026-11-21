@@ -152,7 +152,8 @@ def test_exception_text_is_redacted(broker, server, monkeypatch):
 
 def test_mcp_tools_registered_and_callable(broker, server):
     app = build_app(broker)
-    assert {t.name for t in run(app.list_tools())} == {"list_credentials", "http_request", "browser_login"}
+    assert {t.name for t in run(app.list_tools())} == {"list_credentials", "http_request", "browser_login", "ssh_exec",
+                                                       "win_exec", "sql_query", "rdp_open", "check_credentials"}
     res = run(app.call_tool("http_request", {"credential": "api-header", "method": "GET", "url": server + "/e"}))
     text = res.content[0].text
     assert json.loads(text)["status"] == 200

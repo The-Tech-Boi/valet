@@ -1,0 +1,243 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>How valet works</title>
+<style>
+  :root {
+    --bg: #fbfaf7; --fg: #1d1d1b; --muted: #66645e; --line: #e3e0d8; --card: #ffffff;
+    --accent: #1f6f5c; --secret: #b4462b; --code: #f2efe8;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #151513; --fg: #ecebe6; --muted: #a09d94; --line: #2f2e2a; --card: #1d1d1a;
+            --accent: #5fc2a6; --secret: #f08a6c; --code: #22221f; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--fg);
+         font: 16px/1.6 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  main { max-width: 860px; margin: 0 auto; padding: 56px 24px 96px; }
+  h1 { font-size: 2.4rem; line-height: 1.15; margin: 0 0 12px; letter-spacing: -0.02em; }
+  h2 { font-size: 1.45rem; margin: 64px 0 12px; letter-spacing: -0.01em; }
+  h3 { font-size: 1.05rem; margin: 28px 0 8px; }
+  p, li { max-width: 68ch; }
+  .lede { font-size: 1.15rem; color: var(--muted); margin: 0 0 32px; }
+  a { color: var(--accent); }
+  code, pre { font: 0.88rem/1.55 ui-monospace, "Cascadia Code", Consolas, monospace; }
+  :not(pre) > code { background: var(--code); padding: 1px 5px; border-radius: 4px; }
+  pre { background: var(--code); padding: 16px 18px; border-radius: 8px; overflow-x: auto; margin: 12px 0 20px; }
+  pre .c { color: var(--muted); }
+  pre .s { color: var(--secret); font-weight: 600; }
+  pre .k { color: var(--accent); font-weight: 600; }
+  table { border-collapse: collapse; width: 100%; margin: 12px 0 24px; font-size: 0.94rem; }
+  th, td { text-align: left; padding: 9px 12px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { color: var(--muted); font-weight: 600; font-size: 0.82rem; text-transform: uppercase; letter-spacing: 0.04em; }
+  .pair { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  .pair > div { min-width: 0; }
+  .label { font-size: 0.8rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.06em; }
+  .bad { color: var(--secret); } .good { color: var(--accent); }
+  ol.steps { padding-left: 0; list-style: none; counter-reset: s; }
+  ol.steps li { counter-increment: s; position: relative; padding: 0 0 14px 44px; }
+  ol.steps li::before { content: counter(s); position: absolute; left: 0; top: 0; width: 28px; height: 28px;
+    border-radius: 50%; background: var(--accent); color: var(--bg); font-weight: 700; font-size: 0.85rem;
+    display: grid; place-items: center; }
+  .note { border-left: 3px solid var(--accent); padding: 4px 0 4px 16px; color: var(--muted); }
+  figure { margin: 24px 0 8px; }
+  svg text { font: 14px system-ui, "Segoe UI", sans-serif; fill: var(--fg); }
+  svg .box { fill: var(--card); stroke: var(--line); stroke-width: 1.5; }
+  svg .hl { stroke: var(--accent); }
+  svg .sec { stroke: var(--secret); fill: none; stroke-width: 2; }
+  svg .res { stroke: var(--accent); fill: none; stroke-width: 2; }
+  svg .small { font-size: 13px; fill: var(--muted); }
+  svg .ha { fill: var(--accent); } svg .hs { fill: var(--secret); }
+  @media (max-width: 680px) { .pair { grid-template-columns: 1fr; } h1 { font-size: 1.9rem; } }
+</style>
+</head>
+<body>
+<main>
+
+<h1>How valet works</h1>
+<p class="lede">valet lets a script or a coding assistant <em>use</em> a password, token or login from your
+vault without ever holding it in its hands, the same way an SSH agent signs for you without handing out
+your private key.</p>
+
+<figure>
+<svg viewBox="0 0 820 250" width="100%" role="img"
+     aria-label="The caller asks valet; valet reads the secret from the vault and signs in to the target; only the result goes back to the caller.">
+  <defs>
+    <marker id="a1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+      <path class="ha" d="M0,0 L10,5 L0,10 z"/></marker>
+    <marker id="a2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+      <path class="hs" d="M0,0 L10,5 L0,10 z"/></marker>
+  </defs>
+  <rect class="box" x="10" y="80" width="170" height="80" rx="10"/>
+  <text x="95" y="115" text-anchor="middle" font-weight="600">Caller</text>
+  <text x="95" y="135" text-anchor="middle" class="small">assistant or script</text>
+
+  <rect class="box hl" x="320" y="80" width="170" height="80" rx="10"/>
+  <text x="405" y="115" text-anchor="middle" font-weight="600">valet</text>
+  <text x="405" y="135" text-anchor="middle" class="small">policy, approval, audit</text>
+
+  <rect class="box" x="320" y="0" width="170" height="52" rx="10"/>
+  <text x="405" y="31" text-anchor="middle" font-weight="600">Vault</text>
+
+  <rect class="box" x="630" y="80" width="180" height="80" rx="10"/>
+  <text x="720" y="115" text-anchor="middle" font-weight="600">Target</text>
+  <text x="720" y="135" text-anchor="middle" class="small">API, website, server, DB</text>
+
+  <path class="res" d="M180,105 L318,105" marker-end="url(#a1)"/>
+  <text x="249" y="97" text-anchor="middle" class="small">"use CRM login"</text>
+  <path class="res" d="M320,140 L182,140" marker-end="url(#a1)"/>
+  <text x="249" y="158" text-anchor="middle" class="small">result only</text>
+
+  <path class="sec" d="M405,52 L405,78" marker-end="url(#a2)"/>
+  <path class="sec" d="M490,120 L628,120" marker-end="url(#a2)"/>
+  <text x="559" y="112" text-anchor="middle" class="small">signs in</text>
+
+  <text x="10" y="220" class="small">Green: what the caller sees. Red: the secret, which only travels vault → valet → target.</text>
+</svg>
+</figure>
+
+<h2>The idea in four lines</h2>
+<ol class="steps">
+  <li>The caller asks for an action by <strong>credential name</strong>: "GET this URL with <code>CRM API</code>",
+      "run <code>hostname</code> on the build server".</li>
+  <li>valet looks the item up in one vault collection (<code>Agent</code>), checks the target is one the item
+      allows, and shows you an approval popup if the item's policy asks for one.</li>
+  <li>valet does the sign-in itself: injects the token, answers the Windows challenge, types into the form,
+      opens the SSH or WinRM session.</li>
+  <li>The caller gets the result back. Anything that echoes the secret is replaced with
+      <code>[REDACTED:CRM API]</code>, and one line goes into the audit log.</li>
+</ol>
+
+<h2>Three ways in</h2>
+<table>
+  <tr><th>Who</th><th>How</th><th>Secret ever in the caller?</th></tr>
+  <tr><td>Coding assistant</td><td>MCP tools: <code>http_request</code>, <code>browser_login</code>,
+      <code>ssh_exec</code>, <code>win_exec</code>, <code>sql_query</code>, <code>rdp_open</code>,
+      <code>check_credentials</code></td><td class="good">No</td></tr>
+  <tr><td>Script you wrote</td><td><code>python -m valet run -- &lt;command&gt;</code> with
+      <code>valet://</code> references in the environment</td>
+      <td>In the script's memory only; its output is redacted</td></tr>
+  <tr><td>You, at the terminal</td><td><code>python -m valet rdp &lt;item&gt;</code>,
+      <code>python -m valet check</code></td><td class="good">No (Windows gets the RDP login directly)</td></tr>
+</table>
+
+<h2>Example: a script that needs a password</h2>
+<p>Say you write <code>sync_contacts.py</code>, which signs in to SQL Server and an API. The usual
+shortcut is to paste the password into the file. With valet, the file only names <em>which</em> vault item
+it needs.</p>
+
+<div class="pair">
+<div>
+<p class="label bad">Before: password in the file</p>
+<pre><span class="k">import</span> pyodbc
+
+conn = pyodbc.connect(
+  "SERVER=sql01;UID=sync;"
+  "PWD=<span class="s">Summer2026!</span>")</pre>
+</div>
+<div>
+<p class="label good">After: read it from the environment</p>
+<pre><span class="k">import</span> os, pyodbc
+
+conn = pyodbc.connect(
+  "SERVER=sql01;UID=sync;"
+  f"PWD={os.environ['SQL_PASS']}")</pre>
+</div>
+</div>
+
+<p>Then say where <code>SQL_PASS</code> comes from. Either on the command line:</p>
+<pre>python -m valet run -e SQL_PASS=valet://SQL sync/password -- python sync_contacts.py</pre>
+<p>or in a <code>.env</code> file that is safe to commit, because it holds references and no secrets:</p>
+<pre><span class="c"># .env</span>
+SQL_PASS=valet://SQL sync/password
+API_TOKEN=valet://Contacts API/password
+API_URL=https://contacts.example.com     <span class="c"># plain values pass through unchanged</span></pre>
+<pre>python -m valet run --env-file .env -- python sync_contacts.py</pre>
+
+<h3>What happens when you press Enter</h3>
+<ol class="steps">
+  <li>valet finds every variable whose value starts with <code>valet://</code>. The part before the last
+      <code>/</code> is the item name, the part after it the field: <code>password</code>,
+      <code>username</code>, <code>totp</code> (the current code), <code>uri</code>, or any custom field.</li>
+  <li>For each item it asks your approval once (default: once a day per item; set
+      <code>broker_approval</code> to <code>never</code> for unattended jobs, <code>always</code> for sensitive ones).
+      The popup shows the item and the exact command line.</li>
+  <li>It starts the command with the real values in its environment, and removes <code>BW_SESSION</code> so the
+      script gets its own secrets and not the key to the whole vault.</li>
+  <li>Every line the script prints goes through the redactor, so a stray <code>print(password)</code>,
+      a stack trace or a debug log shows <code>[REDACTED:SQL sync]</code>. The exit code is passed on.</li>
+  <li>The audit log gets a line: time, item names, command, ok or refused.</li>
+</ol>
+
+<p>The same works for any language, because every language reads environment variables:</p>
+<pre><span class="c"># PowerShell</span>
+$cred = New-Object PSCredential 'CORP\sync', (ConvertTo-SecureString $env:SQL_PASS -AsPlainText -Force)
+
+<span class="c"># Node</span>
+const token = process.env.API_TOKEN;
+
+<span class="c"># Bash</span>
+curl -H "Authorization: Bearer $API_TOKEN" "$API_URL/contacts"</pre>
+
+<p class="note">Better still, when a coding assistant runs the job: if the script only calls an API, let the
+assistant call <code>http_request</code> directly, and if it only runs commands on a server, use
+<code>ssh_exec</code> or <code>win_exec</code>. Then no process outside valet ever holds the secret at all.
+<code>valet run</code> is for code that really needs the value itself, such as a database driver.</p>
+
+<h2>Setting up a vault item</h2>
+<p>An item is an ordinary login in the <code>Agent</code> collection. Its URIs say where it may be used,
+and the scheme of each URI says how:</p>
+<table>
+  <tr><th>URI</th><th>Used by</th><th>Notes</th></tr>
+  <tr><td><code>https://api.example.com</code></td><td>http_request, browser_login</td>
+      <td>exact host; <code>https://*.example.com</code> for subdomains</td></tr>
+  <tr><td><code>ssh://10.0.0.5</code></td><td>ssh_exec</td><td>password SSH; host key must be in known_hosts</td></tr>
+  <tr><td><code>winrm://10.0.0.6</code></td><td>win_exec</td><td>PowerShell over WinRM, NTLM, port 5985
+      (<code>winrms://</code> for 5986)</td></tr>
+  <tr><td><code>mssql://10.0.0.7</code></td><td>sql_query</td><td><code>DOMAIN\user</code> = Windows auth,
+      otherwise a SQL login</td></tr>
+  <tr><td><code>rdp://10.0.0.6</code></td><td>rdp_open</td><td>opens Remote Desktop for you, already signed in</td></tr>
+  <tr><td><code>10.0.0.8</code> (no scheme)</td><td>check_credentials</td><td>probed for ssh, WinRM and
+      SQL Server; tells you which scheme to add</td></tr>
+</table>
+<p>One item can list several URIs: a Windows server login might carry <code>winrm://</code>,
+<code>rdp://</code> and <code>mssql://</code> for the same host. A password is never sent to a host or
+protocol the item does not list.</p>
+
+<table>
+  <tr><th>Custom field</th><th>Values</th></tr>
+  <tr><td><code>broker_auth</code></td><td>web only: <code>bearer</code> (default), <code>basic</code>,
+      <code>header:&lt;Name&gt;</code>, <code>query:&lt;param&gt;</code>, <code>form</code>, <code>ntlm</code></td></tr>
+  <tr><td><code>broker_approval</code></td><td><code>never</code>, <code>daily</code>, <code>always</code></td></tr>
+  <tr><td><code>broker_allow_http</code></td><td><code>yes</code> to allow plain http (trusted network only)</td></tr>
+  <tr><td><code>broker_trust_cert</code></td><td><code>yes</code> to accept a self-signed certificate (SQL Server, WinRM over https)</td></tr>
+</table>
+
+<h2>After an import: find the wrong passwords</h2>
+<p>Bulk imports from old notes are never perfect. Instead of retyping everything, run</p>
+<pre>python -m valet check</pre>
+<p>It approves once, tries every item's sign-in and prints <code>ok</code>, <code>failed</code> or
+<code>skipped</code> per URI. Fix only the failed ones in the vault, then run it again.</p>
+
+<h2>What it does and does not protect</h2>
+<table>
+  <tr><th>Protected</th><th>Not protected</th></tr>
+  <tr><td>Secrets stay out of the assistant's context, transcripts and logs</td>
+      <td>valet runs as your Windows user: a hostile program running as you can read what valet can</td></tr>
+  <tr><td>A credential only goes to the hosts and protocols listed on its item</td>
+      <td>A script started with <code>valet run</code> holds the real value and could write it somewhere
+          other than its output</td></tr>
+  <tr><td>Only the <code>Agent</code> collection is visible; the rest of the vault does not exist for valet</td>
+      <td>The shared browser keeps the session cookie after <code>browser_login</code>, which is the point</td></tr>
+  <tr><td>Approval popups and an audit trail of every use</td><td></td></tr>
+  <tr><td>RDP passwords are stored as Windows domain credentials, which ordinary programs cannot read back</td><td></td></tr>
+</table>
+<p class="note">In short: valet keeps honest automation from ever seeing secrets, and makes every use visible.
+It is not a sandbox against malicious code running as your own user. For that, run the broker as a separate
+account or on another machine.</p>
+
+</main>
+</body>
+</html>

@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<style>
+  :root {
+    color-scheme: light dark;
+    --win: #f9f9f9; --win-2: #f3f3f3; --fg: #1b1b1b; --muted: #5f6368; --line: #e1e1e1;
+    --accent: #005fb8; --accent-fg: #ffffff; --btn: #fdfdfd; --btn-line: #d1d1d1; --code: #f0f0f0;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --win: #2b2b2b; --win-2: #202020; --fg: #f3f3f3; --muted: #b4b7bb; --line: #3a3a3a;
+      --accent: #4cc2ff; --accent-fg: #00121c; --btn: #373737; --btn-line: #454545; --code: #1c1c1c;
+    }
+    button:hover { filter: brightness(1.12); }
+  }
+  * { box-sizing: border-box; }
+  ::selection { background: var(--accent); color: var(--accent-fg); }
+  html { overflow: hidden; }
+  body { margin: 0; background: var(--win); color: var(--fg); user-select: none; cursor: default;
+         font: 14px/1.45 "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif; }
+  .body { padding: 8px 24px 20px; }
+  .foot { background: var(--win-2); border-top: 1px solid var(--line); padding: 16px 24px;
+          display: flex; gap: 8px; justify-content: flex-end; }
+  button { font: inherit; min-width: 96px; padding: 6px 14px; border-radius: 4px; cursor: pointer;
+           border: 1px solid var(--btn-line); background: var(--btn); color: var(--fg); }
+  button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-fg); }
+  button:hover { filter: brightness(.97); }
+  button:focus-visible { outline: 2px solid var(--fg); outline-offset: 2px; }
+  .q { font: 600 20px/1.3 "Segoe UI Variable Display", "Segoe UI", system-ui, sans-serif; margin: 6px 0 4px;
+       text-wrap: balance; overflow-wrap: anywhere; }
+  .sub { color: var(--muted); margin: 0 0 16px; }
+  dl { display: grid; grid-template-columns: 96px 1fr; gap: 6px 12px; margin: 0; }
+  dt { color: var(--muted); }
+  dd { margin: 0; overflow-wrap: anywhere; min-width: 0; }
+  .note { color: var(--muted); }
+  .cmd { font: 12.5px/1.5 "Cascadia Mono", Consolas, monospace; background: var(--code); border: 1px solid var(--line);
+         border-radius: 4px; padding: 8px 10px; margin: 4px 0 0; white-space: pre-wrap; max-height: 240px;
+         overflow: auto; user-select: text; cursor: text; }
+  .fine { color: var(--muted); font-size: 12px; margin: 16px 0 0; display: flex; gap: 6px; align-items: center; }
+  .icon { width: 16px; height: 16px; flex: none; }
+  .timer { margin-right: auto; align-self: center; color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+</style>
+</head>
+<body>
+<div class="body" role="dialog" aria-labelledby="q" aria-describedby="sub">
+  <p class="q" id="q"></p>
+  <p class="sub" id="sub"></p>
+  <dl id="rows"></dl>
+  <p class="fine"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><g fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M3 3l18 18"/><path d="M10.6 6.1A9.8 9.8 0 0 1 12 6c5 0 9 6 9 6a17 17 0 0 1-2.6 3.2"/><path d="M6.6 6.6C4.2 8.2 3 12 3 12s4 6 9 6a9 9 0 0 0 4.4-1.1"/><path d="M9.9 9.9a3 3 0 0 0 4.2 4.2"/></g></svg>
+    <span id="fine"></span></p>
+</div>
+<div class="foot">
+  <span class="timer" id="timer">Denies in 1:00</span>
+  <button data-a="today">Allow today</button>
+  <button data-a="once">Allow once</button>
+  <button data-a="deny" class="primary" id="deny" autofocus>Deny</button>
+</div>
+<script>
+  const d = window.valet, $ = id => document.getElementById(id);
+  let done = false;
+  const answer = a => { if (!done) { done = true; ipc.postMessage(a); } };
+  $("q").textContent = d.question;
+  $("sub").textContent = d.sub;
+  $("fine").textContent = d.fine;
+  for (const r of d.rows) {
+    const dt = document.createElement("dt"), dd = document.createElement("dd");
+    dt.textContent = r.label;
+    if (r.code) {
+      const box = dd.appendChild(document.createElement("div"));
+      box.className = "cmd";
+      box.textContent = r.text;
+    } else dd.textContent = r.text;
+    if (r.note) {
+      const n = dd.appendChild(document.createElement("span"));
+      n.className = "note";
+      n.textContent = ` (${r.note})`;
+    }
+    $("rows").append(dt, dd);
+  }
+  for (const b of document.querySelectorAll("button")) b.onclick = () => answer(b.dataset.a);
+  addEventListener("keydown", e => {
+    if (e.key === "Escape" || (e.key === "Enter" && !(e.target instanceof HTMLButtonElement))) answer("deny");
+  });
+  addEventListener("contextmenu", e => e.preventDefault());
+  const end = Date.now() + 60000;
+  const tick = () => {
+    const s = Math.max(0, Math.ceil((end - Date.now()) / 1000));
+    $("timer").textContent = `Denies in ${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+    if (s === 0) answer("deny");
+  };
+  setInterval(tick, 250);
+  $("deny").focus();
+  ipc.postMessage("size:" + document.documentElement.offsetHeight);
+</script>
+</body>
+</html>
