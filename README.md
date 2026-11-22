@@ -1,49 +1,77 @@
 # valet
 
-A small local MCP server that lets automation and coding assistants *use* credentials stored in
-Vaultwarden without ever seeing them. It works like an SSH agent: valet reads the secret from the vault,
-performs the auth (an HTTP request with the token injected, a browser form login, a Windows sign-in, an
-SSH, WinRM or SQL Server session, a Remote Desktop window), and hands back only the result. Anything
-secret that echoes back in a response or an error is replaced with `[REDACTED:<credential>]`. Scripts that
-need the value itself get it through `valet run`, with their output redacted.
+valet lets a script or a coding assistant *use* a password, token or login from your Vaultwarden (or
+Bitwarden) vault without ever holding it, the same way an SSH agent signs for you without handing out your
+private key. It is a small local MCP server and command-line tool for Windows: one executable, no runtime
+to install.
 
-One Windows executable, no runtime to install. A longer walkthrough with diagrams:
-[docs/how-valet-works.html](docs/how-valet-works.html).
+```mermaid
+flowchart LR
+    Caller["Caller<br/><small>assistant or script</small>"]
+    Valet["valet<br/><small>policy, approval, audit</small>"]
+    Vault[(Vault)]
+    Target["Target<br/><small>API, website, server, DB</small>"]
+    Caller -- "use CRM login" --> Valet
+    Valet -- "result only" --> Caller
+    Vault -. secret .-> Valet
+    Valet -. "signs in" .-> Target
+```
 
-## Security model
+Solid arrows: what the caller sees. Dotted: the secret, which only travels vault → valet → target.
 
-valet runs as the same Windows user as the caller, so it is **not** an OS-level isolation boundary: a
-process that can read your files or attach to your browser can get at what valet can. What it does is keep
-secret values out of the caller's context, transcript and logs, refuse to send a credential to any host
-not listed on the vault item, ask you before sensitive uses, and write an audit trail. Only items in one
-vault collection exist for valet, which limits the blast radius to what you put there. The shared browser
-is a deliberate trade-off: after `browser_login` the session cookie lives in a browser the caller drives,
-which is the point; a hostile caller could also read a field valet just filled.
+## How it works
 
-## Setup
+1. The caller asks for an action by **credential name**: "GET this URL with `CRM API`", "run `hostname` on
+   the build server".
+2. valet looks the item up in one vault collection (`Agent`), checks that the target is one the item
+   allows, and shows you an approval window if the item's policy asks for one.
+3. valet does the sign-in itself: injects the token, answers the Windows challenge, types into the login
+   form, opens the SSH, WinRM, SQL Server or Remote Desktop session.
+4. The caller gets the result back. Anything that echoes the secret is replaced with
+   `[REDACTED:CRM API]`, and one line goes into the audit log.
 
-1. Build it (Rust stable, Windows):
+There are three ways in:
+
+| Who | How | Secret ever in the caller? |
+|---|---|---|
+| Coding assistant | MCP tools: `http_request`, `browser_login`, `ssh_exec`, `win_exec`, `sql_query`, `rdp_open`, `check_credentials` | No |
+| Script you wrote | `valet run -- <command>` with `valet://` references in the environment | In the script's memory only; its output is redacted |
+| You, at the terminal | `valet rdp <item>`, `valet check` | No (Windows gets the RDP login directly) |
+
+## Install
+
+Windows 10 or 11 (valet's windows use the WebView2 runtime that ships with them).
+
+1. Download `valet.exe` from the [latest release](https://github.com/The-Tech-Boi/valet/releases/latest)
+   (or build it: `cargo build --release`, Rust stable). The exe is not code-signed, so check it against the
+   release's `SHA256SUMS`: `Get-FileHash valet.exe`.
+2. Install it. This copies `valet.exe` to `%LOCALAPPDATA%\Programs\valet` and adds that folder to your user
+   PATH (no admin rights), so `valet` works in any new terminal. From the download folder:
    ```
-   cargo build --release
+   .\valet.exe install
    ```
-2. Install it: copies `valet.exe` to `%LOCALAPPDATA%\Programs\valet` and adds that folder to your user
-   PATH (no admin rights), so `valet` works in any new terminal.
+   Run it again with a newer `valet.exe` to update; `valet uninstall` removes it.
+3. The first install opens the setup window: your vault URL and your **personal** API key (web vault →
+   Account settings → Security → Keys → View API key; the `client_id` starts with `user.`). valet keeps the
+   login in `%LOCALAPPDATA%\valet`, protected with Windows DPAPI. `valet setup` changes it later.
+4. In the vault, create a collection named `Agent` and put the items valet may use in it. Nothing outside
+   that collection exists for valet.
+5. Register the MCP server in your client: a stdio server whose command is the installed exe, no
+   arguments.
+   ```json
+   {
+     "mcpServers": {
+       "valet": { "command": "C:\\Users\\<you>\\AppData\\Local\\Programs\\valet\\valet.exe" }
+     }
+   }
    ```
-   target\release\valet.exe install
-   ```
-   The first install opens the setup window: your vault URL and your **personal** API key
-   (Vaultwarden web vault → Account settings → Security → Keys → View API key; the `client_id` starts
-   with `user.`). valet stores the login in `%LOCALAPPDATA%\valet`, protected with Windows DPAPI.
-   Run `valet setup` to change it later.
-3. In the vault, create a collection named `Agent` and put the items valet may use in it.
-4. Register the MCP server in your client (see below).
-5. For `browser_login`, start the shared browser with `valet browser`. It launches Edge (or Chrome) with
-   `--remote-debugging-port=9333` and its own profile in `%LOCALAPPDATA%\valet\browser-profile`. Point
-   other browser automation at the same endpoint (for example Playwright MCP with
+6. For `browser_login`, start the shared browser with `valet browser`. It launches Edge (or Chrome) with
+   `--remote-debugging-port=9333` and its own profile in `%LOCALAPPDATA%\valet\browser-profile`. Point other
+   browser automation at the same endpoint (for example Playwright MCP with
    `--cdp-endpoint http://127.0.0.1:9333`).
 
-The first tool call starts a background agent and opens an Unlock window for your master password. The
-agent keeps the vault unlocked until `valet lock` or `valet stop`. It reads the vault when it unlocks, so
+The first tool call starts a background agent, which opens an Unlock window for your master password and
+then serves every MCP client until `valet lock` or `valet stop`. It reads the vault when it unlocks, so
 after changing items run `valet lock`; the next call unlocks again with the current items.
 
 Environment variables (no config files):
@@ -54,88 +82,44 @@ Environment variables (no config files):
 | `VALET_CDP` | `http://127.0.0.1:9333` |
 | `VALET_DIR` | `%LOCALAPPDATA%\valet` (login, audit log, browser profile) |
 
-## Tools
+## Setting up a vault item
 
-- `list_credentials()`: names, ids, allowed hosts, usable tools with auth type and approval policy, TOTP yes/no.
-- `http_request(credential, method, url, headers, body, json, timeout)`: injects auth; https only (http
-  allowed for localhost); refuses hosts not on the item; does not follow redirects; returns status,
-  selected headers and the body (truncated at 20,000 characters).
-- `browser_login(credential, url)`: reuses a tab on an allowed host or opens the URL; fills username,
-  password and TOTP; returns status, URL and title only. It re-checks the page host before typing anything.
-- `ssh_exec(credential, command, host, timeout)`: password SSH to the item's `ssh://` URI. The host key must
-  already be in `~/.ssh/known_hosts`. Returns exit code, stdout, stderr. (Key-based SSH: use an SSH agent.)
-- `win_exec(credential, command, host, timeout)`: PowerShell over WinRM with Negotiate/NTLM to the item's
-  `winrm://` (5985, message-encrypted) or `winrms://` (5986) URI.
-- `sql_query(credential, query, database, host, max_rows)`: T-SQL on the item's `mssql://` URI, autocommit.
-  `DOMAIN\user` usernames sign in with Windows auth, others as SQL logins.
-- `rdp_open(credential, host)`: stores the login as a Windows domain credential for `TERMSRV/<host>` (only
-  LSA can read its password back; dropped at sign-out) and starts `mstsc`. Nobody types the password.
-- `check_credentials(credentials)`: one approval, then tries every item's sign-in on every URI and reports
-  ok / failed / skipped. A URI without a scheme (a bare IP) is never signed in to; the result says which
-  server ports are open there.
+An item is an ordinary login (username, password, optional TOTP) in the `Agent` collection. Its URIs say
+where it may be used, and the scheme of each URI says how:
 
-## Scripts: `valet run`
+| URI | Used by | Notes |
+|---|---|---|
+| `https://api.example.com` | `http_request`, `browser_login` | exact host; `https://*.example.com` for subdomains |
+| `ssh://10.0.0.5` | `ssh_exec` | password SSH; the host key must already be in `~/.ssh/known_hosts` |
+| `winrm://10.0.0.6` | `win_exec` | PowerShell over WinRM, Negotiate/NTLM, port 5985, message-encrypted (`winrms://` for 5986) |
+| `mssql://10.0.0.7` | `sql_query` | `DOMAIN\user` signs in with Windows auth, otherwise a SQL login |
+| `rdp://10.0.0.6` | `rdp_open` | opens Remote Desktop for you, already signed in |
+| `10.0.0.8` (no scheme) | `check_credentials` | never signed in to; reports which server ports are open so you know which scheme to add |
 
-Don't hardcode a password in a script; read it from the environment and let valet fill it in:
+Any URI may add a `:port`. One item can list several URIs: a Windows server login might carry `winrm://`,
+`rdp://` and `mssql://` for the same host. A password is never sent to a host or protocol the item does not
+list.
 
-```
-valet run -e SQL_PASS=valet://SQL sync/password -- python sync.py
-valet run --env-file .env -- python sync.py     # .env lines like API_TOKEN=valet://Contacts API/password
-```
-
-A value `valet://<item>/<field>` (field: `password`, `username`, `totp`, `uri` or a custom field name) is
-replaced with the secret after one approval per item (tool `run`, default `daily`). `BW_SESSION` is removed
-from the child's environment, the child's stdout and stderr are copied through the redactor, the exit code is
-passed on, and the run is audited. The script itself does hold the value, so prefer the MCP tools when they
-cover the job.
-
-## Command line
-
-```
-valet                   MCP server on stdio (what MCP clients run)
-valet install           copy to %LOCALAPPDATA%\Programs\valet, add to PATH, then setup
-valet uninstall         undo install (your login in %LOCALAPPDATA%\valet stays)
-valet setup             connect to the vault: URL and personal API key
-valet unlock | lock     unlock (asks the master password) or lock the agent
-valet status            locked/unlocked, item count
-valet stop              stop the background agent
-valet run ... -- CMD    see above
-valet rdp ITEM [HOST]   Remote Desktop, signed in
-valet check [ITEM...]   ok/failed per item and URI
-valet browser           Edge/Chrome with the CDP port browser_login uses
-```
-
-## Item fields
-
-valet reads the item's login (username, password, TOTP, URIs) and these custom fields:
+Custom fields change the defaults:
 
 | Field | Values | Default |
 |---|---|---|
-| `broker_auth` | `bearer`, `basic`, `header:<Name>`, `query:<param>`, `form`, `ntlm` | `bearer` for http_request, `form` for browser_login |
-| `broker_approval` | `never`, `daily`, `always` | `never` for http_request, `daily` for browser_login |
-| `broker_allow_http` | `yes` to allow plain http to the item's hosts (e.g. over a VPN) | https only (http always allowed for localhost) |
-| `broker_trust_cert` | `yes` to accept a self-signed certificate (SQL Server, `winrms://`, https) | certificate validated |
+| `broker_auth` | web only: `bearer`, `basic`, `header:<Name>`, `query:<param>`, `form`, `ntlm` | `bearer` for `http_request`, `form` for `browser_login` |
+| `broker_approval` | `never`, `daily`, `always` | per tool, see below |
+| `broker_allow_http` | `yes` to allow plain http to the item's hosts (trusted network or VPN only) | https only (http always allowed for localhost) |
+| `broker_trust_cert` | `yes` to accept a self-signed certificate (https, SQL Server, `winrms://`) | certificate validated |
 | `user_selector`, `pass_selector`, `submit_selector` | CSS selectors for odd login forms | heuristics |
 
-Approval defaults per tool: `http_request` and `rdp_open` never; `browser_login`, `ssh_exec`, `win_exec`,
-`sql_query` and `run` daily; `check_credentials` always (once per batch). `broker_approval` on the item
-overrides all of them.
+`browser_login` works with `form` and `ntlm` items; `http_request` with everything but `form`. `ntlm` is
+Windows sign-in (servers answering 401 with `Negotiate`/`NTLM`, such as on-premises IIS apps), username as
+`DOMAIN\user`. In the browser valet answers the sign-in challenge over the DevTools protocol and the browser
+keeps it for the session, so later tabs on that host stay signed in.
 
-The URI scheme decides which tool may use the item where: `ssh://`, `winrm://`, `winrms://`, `mssql://`,
-`rdp://` (optional `:port`) for the server tools, `http(s)://` or no scheme for the web tools. A password is
-never sent to a host or protocol the item does not list. Web hosts are exact matches; write
-`https://*.example.com` to allow subdomains. `browser_login` works with `form` and `ntlm` items;
-`http_request` works with everything but `form`. `ntlm` is Windows sign-in (servers answering 401 with
-`Negotiate`/`NTLM`, such as on-premises IIS apps): username as `DOMAIN\user`. In the browser valet answers
-the sign-in challenge over CDP and the browser keeps it for the session, so later tabs on that host stay
-signed in.
-
-Approval opens a window naming the credential, operation, host and calling program: **Allow today**
-(only meaningful for `daily`), **Allow once**, or **Deny** (the default button). Concurrent calls for the
-same item share one prompt.
-
-Every call is appended to `%LOCALAPPDATA%\valet\audit.jsonl` (time, tool, credential, method,
-host and path without query string, result). No secrets are written there.
+**Approval.** Defaults per tool: `http_request` and `rdp_open` never; `browser_login`, `ssh_exec`,
+`win_exec`, `sql_query` and `run` daily; `check_credentials` always (once per batch). `broker_approval` on
+the item overrides all of them. The approval window names the credential, operation, host and calling
+program: **Allow today** (only meaningful for `daily`), **Allow once**, or **Deny** (the default button).
+Concurrent calls for the same item share one prompt.
 
 ### Examples
 
@@ -158,19 +142,117 @@ too); no custom fields (form, daily approval). If the form is unusual, add for e
 `rdp://jump.corp.lan`. The vault's Launch button cannot open it; call `rdp_open` or run
 `valet rdp "Jump host"`.
 
-## MCP registration
+## MCP tools
 
-Register a stdio server whose command is the installed exe, with no arguments:
+- `list_credentials()`: names, ids, allowed hosts, usable tools with auth type and approval policy, TOTP yes/no.
+- `http_request(credential, method, url, headers, body, json, timeout)`: injects auth; refuses hosts not on
+  the item; does not follow redirects; returns status, selected headers and the body (truncated at 20,000
+  characters).
+- `browser_login(credential, url)`: reuses a tab on an allowed host or opens the URL; fills username,
+  password and TOTP; returns status, URL and title only. It re-checks the page host before typing anything.
+- `ssh_exec(credential, command, host, timeout)`: returns exit code, stdout, stderr. (Key-based SSH: use an
+  SSH agent.)
+- `win_exec(credential, command, host, timeout)`: PowerShell over WinRM; returns exit code, stdout, stderr.
+- `sql_query(credential, query, database, host, max_rows)`: T-SQL, autocommit.
+- `rdp_open(credential, host)`: stores the login as a Windows domain credential for `TERMSRV/<host>` (only
+  LSA can read its password back; dropped at sign-out) and starts `mstsc`. Nobody types the password.
+- `check_credentials(credentials)`: one approval, then tries every item's sign-in on every URI and reports
+  ok / failed / skipped.
 
-```json
-{
-  "mcpServers": {
-    "valet": {
-      "command": "C:\\Users\\<you>\\AppData\\Local\\Programs\\valet\\valet.exe"
-    }
-  }
-}
+## Scripts: `valet run`
+
+Say you write `sync_contacts.py`, which signs in to SQL Server and an API. The usual shortcut is to paste
+the password into the file. With valet, the file reads it from the environment:
+
+```python
+# Before: password in the file
+conn = pyodbc.connect("SERVER=sql01;UID=sync;PWD=Summer2026!")
+
+# After: read it from the environment
+conn = pyodbc.connect(f"SERVER=sql01;UID=sync;PWD={os.environ['SQL_PASS']}")
 ```
+
+Then say where `SQL_PASS` comes from, either on the command line:
+
+```
+valet run -e SQL_PASS=valet://SQL sync/password -- python sync_contacts.py
+```
+
+or in a `.env` file that is safe to commit, because it holds references and no secrets:
+
+```
+# .env
+SQL_PASS=valet://SQL sync/password
+API_TOKEN=valet://Contacts API/password
+API_URL=https://contacts.example.com     # plain values pass through unchanged
+```
+
+```
+valet run --env-file .env -- python sync_contacts.py
+```
+
+What happens then:
+
+1. valet finds every variable whose value starts with `valet://`. The part before the last `/` is the item
+   name, the part after it the field: `password`, `username`, `totp` (the current code), `uri`, or any
+   custom field.
+2. It asks your approval once per item (default once a day; set `broker_approval` to `never` for unattended
+   jobs, `always` for sensitive ones). The window shows the item and the exact command line.
+3. It starts the command with the real values in its environment, and removes `BW_SESSION` so the script
+   gets its own secrets and not the key to the whole vault.
+4. Every line the script prints goes through the redactor, so a stray `print(password)`, a stack trace or a
+   debug log shows `[REDACTED:SQL sync]`. The exit code is passed on.
+5. The audit log gets a line: time, item names, command, ok or refused.
+
+This works for any language, because every language reads environment variables (`$env:SQL_PASS`,
+`process.env.API_TOKEN`, `$API_TOKEN`). Still, when a coding assistant runs the job and the script only
+calls an API or runs commands on a server, let it use `http_request`, `ssh_exec` or `win_exec` directly:
+then no process outside valet ever holds the secret. `valet run` is for code that really needs the value
+itself, such as a database driver.
+
+## After an import: find the wrong passwords
+
+Bulk imports from old notes are never perfect. Instead of retyping everything, run
+
+```
+valet check
+```
+
+It asks once, tries every item's sign-in and prints `ok`, `failed` or `skipped` per URI. Fix only the
+failed ones in the vault, run `valet lock`, then check again.
+
+## Command line
+
+```
+valet                   MCP server on stdio (what MCP clients run)
+valet install           copy to %LOCALAPPDATA%\Programs\valet, add to PATH, then setup
+valet uninstall         undo install (your login in %LOCALAPPDATA%\valet stays)
+valet setup             connect to the vault: URL and personal API key
+valet unlock | lock     unlock (asks the master password) or lock the agent
+valet status            locked/unlocked, item count
+valet stop              stop the background agent
+valet run ... -- CMD    see above
+valet rdp ITEM [HOST]   Remote Desktop, signed in
+valet check [ITEM...]   ok/failed per item and URI
+valet browser           Edge/Chrome with the DevTools port browser_login uses
+```
+
+Every call is appended to `%LOCALAPPDATA%\valet\audit.jsonl` (time, tool, credential, method, host and
+path without query string, result). No secrets are written there.
+
+## What it does and does not protect
+
+| Protected | Not protected |
+|---|---|
+| Secrets stay out of the assistant's context, transcripts and logs | valet runs as your Windows user: a hostile program running as you can read what valet can |
+| A credential only goes to the hosts and protocols listed on its item | A script started with `valet run` holds the real value and could write it somewhere other than its output |
+| Only the `Agent` collection is visible; the rest of the vault does not exist for valet | The shared browser keeps the session cookie after `browser_login`, which is the point; a hostile caller could also read a field valet just filled |
+| Approval windows and an audit trail of every use | |
+| RDP passwords are stored as Windows domain credentials, which ordinary programs cannot read back | |
+
+In short: valet keeps honest automation from ever seeing secrets, and makes every use visible. It is not a
+sandbox against malicious code running as your own user. For that, run it as a separate account or on
+another machine.
 
 ## Development
 
