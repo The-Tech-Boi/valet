@@ -116,11 +116,11 @@ your private key.</p>
   <tr><td>Coding assistant</td><td>MCP tools: <code>http_request</code>, <code>browser_login</code>,
       <code>ssh_exec</code>, <code>win_exec</code>, <code>sql_query</code>, <code>rdp_open</code>,
       <code>check_credentials</code></td><td class="good">No</td></tr>
-  <tr><td>Script you wrote</td><td><code>python -m valet run -- &lt;command&gt;</code> with
+  <tr><td>Script you wrote</td><td><code>valet run -- &lt;command&gt;</code> with
       <code>valet://</code> references in the environment</td>
       <td>In the script's memory only; its output is redacted</td></tr>
-  <tr><td>You, at the terminal</td><td><code>python -m valet rdp &lt;item&gt;</code>,
-      <code>python -m valet check</code></td><td class="good">No (Windows gets the RDP login directly)</td></tr>
+  <tr><td>You, at the terminal</td><td><code>valet rdp &lt;item&gt;</code>,
+      <code>valet check</code></td><td class="good">No (Windows gets the RDP login directly)</td></tr>
 </table>
 
 <h2>Example: a script that needs a password</h2>
@@ -148,13 +148,13 @@ conn = pyodbc.connect(
 </div>
 
 <p>Then say where <code>SQL_PASS</code> comes from. Either on the command line:</p>
-<pre>python -m valet run -e SQL_PASS=valet://SQL sync/password -- python sync_contacts.py</pre>
+<pre>valet run -e SQL_PASS=valet://SQL sync/password -- python sync_contacts.py</pre>
 <p>or in a <code>.env</code> file that is safe to commit, because it holds references and no secrets:</p>
 <pre><span class="c"># .env</span>
 SQL_PASS=valet://SQL sync/password
 API_TOKEN=valet://Contacts API/password
 API_URL=https://contacts.example.com     <span class="c"># plain values pass through unchanged</span></pre>
-<pre>python -m valet run --env-file .env -- python sync_contacts.py</pre>
+<pre>valet run --env-file .env -- python sync_contacts.py</pre>
 
 <h3>What happens when you press Enter</h3>
 <ol class="steps">
@@ -199,8 +199,8 @@ and the scheme of each URI says how:</p>
   <tr><td><code>mssql://10.0.0.7</code></td><td>sql_query</td><td><code>DOMAIN\user</code> = Windows auth,
       otherwise a SQL login</td></tr>
   <tr><td><code>rdp://10.0.0.6</code></td><td>rdp_open</td><td>opens Remote Desktop for you, already signed in</td></tr>
-  <tr><td><code>10.0.0.8</code> (no scheme)</td><td>check_credentials</td><td>probed for ssh, WinRM and
-      SQL Server; tells you which scheme to add</td></tr>
+  <tr><td><code>10.0.0.8</code> (no scheme)</td><td>check_credentials</td><td>never signed in to; reports which
+      server ports are open so you know which scheme to add</td></tr>
 </table>
 <p>One item can list several URIs: a Windows server login might carry <code>winrm://</code>,
 <code>rdp://</code> and <code>mssql://</code> for the same host. A password is never sent to a host or
@@ -217,7 +217,7 @@ protocol the item does not list.</p>
 
 <h2>After an import: find the wrong passwords</h2>
 <p>Bulk imports from old notes are never perfect. Instead of retyping everything, run</p>
-<pre>python -m valet check</pre>
+<pre>valet check</pre>
 <p>It approves once, tries every item's sign-in and prints <code>ok</code>, <code>failed</code> or
 <code>skipped</code> per URI. Fix only the failed ones in the vault, then run it again.</p>
 
