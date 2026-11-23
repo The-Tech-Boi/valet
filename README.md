@@ -1,4 +1,10 @@
-# valet
+<h1>
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/valet-dark.svg">
+    <img src="assets/valet-light.svg" alt="" width="48" height="48" align="absmiddle">
+  </picture>
+  valet
+</h1>
 
 valet lets a script or a coding assistant *use* a password, token or login from your Vaultwarden (or
 Bitwarden) vault without ever holding it, the same way an SSH agent signs for you without handing out your
@@ -262,6 +268,8 @@ cargo clippy --all-targets
 ```
 
 Tests are offline (fake vault, local test servers). The browser tests drive a real Edge or Chrome.
+The icon is drawn in `assets/valet.svg` (and `valet-small.svg` for 16–24 px); `py -3 assets/make_icon.py`
+rebuilds `assets/valet.ico`, which `build.rs` embeds in the exe.
 
 ## Licence
 

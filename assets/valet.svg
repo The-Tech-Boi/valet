@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
+  <defs>
+    <linearGradient id="fill" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#3a96dd"/><stop offset="1" stop-color="#0f6cbd"/>
+    </linearGradient>
+    <mask id="cut" maskUnits="userSpaceOnUse" x="0" y="0" width="64" height="64">
+      <rect width="64" height="64" fill="#fff"/>
+      <path d="M10 15.5l6.5 6.5-6.5 6.5M20.5 28.5h8" fill="none" stroke="#000" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+      <g fill="#000" stroke="#000" stroke-width="7" stroke-linejoin="round">
+        <circle cx="50" cy="40" r="11.5"/><rect x="15" y="36.5" width="30" height="7" rx="3.5"/>
+        <rect x="18" y="40" width="6" height="10" rx="2.5"/><rect x="27" y="40" width="6" height="7.5" rx="2.5"/>
+      </g>
+    </mask>
+    <mask id="hole" maskUnits="userSpaceOnUse" x="0" y="0" width="64" height="64">
+      <rect width="64" height="64" fill="#fff"/><circle cx="50" cy="40" r="4.6" fill="#000"/>
+    </mask>
+  </defs>
+  <rect x="2" y="7" width="44" height="50" rx="8" fill="url(#fill)" mask="url(#cut)"/>
+  <g fill="url(#fill)" mask="url(#hole)">
+    <circle cx="50" cy="40" r="11.5"/><rect x="15" y="36.5" width="30" height="7" rx="3.5"/>
+    <rect x="18" y="40" width="6" height="10" rx="2.5"/><rect x="27" y="40" width="6" height="7.5" rx="2.5"/>
+  </g>
+</svg>

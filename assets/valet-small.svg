@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
+  <defs>
+    <linearGradient id="fill" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#3a96dd"/><stop offset="1" stop-color="#0f6cbd"/>
+    </linearGradient>
+    <mask id="cut" maskUnits="userSpaceOnUse" x="0" y="0" width="64" height="64">
+      <rect width="64" height="64" fill="#fff"/>
+      <path d="M10 13l8 8-8 8" fill="none" stroke="#000" stroke-width="6" stroke-linecap="square"/>
+      <g fill="#000"><circle cx="47" cy="43" r="18"/><rect x="10" y="37" width="32" height="7"/><rect x="14" y="37" width="8" height="11"/></g>
+    </mask>
+    <mask id="hole" maskUnits="userSpaceOnUse" x="0" y="0" width="64" height="64">
+      <rect width="64" height="64" fill="#fff"/><circle cx="47" cy="43" r="5" fill="#000"/>
+    </mask>
+  </defs>
+  <rect x="0" y="4" width="44" height="52" rx="8" fill="url(#fill)" mask="url(#cut)"/>
+  <circle cx="47" cy="43" r="13" fill="url(#fill)" mask="url(#hole)"/>
+</svg>

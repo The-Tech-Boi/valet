@@ -15,8 +15,8 @@ use serde_json::{json, Value};
 use tao::dpi::{LogicalSize, PhysicalPosition};
 use tao::event::{Event, WindowEvent};
 use tao::event_loop::{ControlFlow, EventLoopBuilder, EventLoopProxy};
-use tao::platform::windows::EventLoopBuilderExtWindows;
-use tao::window::{Window, WindowBuilder};
+use tao::platform::windows::{EventLoopBuilderExtWindows, IconExtWindows};
+use tao::window::{Icon, Window, WindowBuilder};
 use wry::{WebContext, WebView, WebViewBuilder};
 use zeroize::Zeroizing;
 
@@ -166,6 +166,7 @@ fn run(started: Sender<EventLoopProxy<Msg>>) {
             Event::UserEvent(Msg::Show { id, html, data, reply }) => {
                 let window = WindowBuilder::new()
                     .with_title("valet")
+                    .with_window_icon(Icon::from_resource(1, None).ok()) // assets/valet.rc
                     .with_inner_size(LogicalSize::new(WIDTH, 400.0))
                     .with_visible(false)
                     .with_resizable(false)
